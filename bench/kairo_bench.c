@@ -13,10 +13,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
 
-#include "kairo_hints.h"
+#include <kairo_hints.h>
 
 #ifndef O_DIRECT
 #define O_DIRECT 0
@@ -70,6 +71,7 @@ struct kairo_config {
     unsigned int stride_blocks;
     unsigned int cluster_size_blocks;
     size_t fragment_size_bytes;
+    enum kairo_hint_mode hint_mode;
 };
 
 struct kairo_stats {
@@ -92,6 +94,12 @@ struct kairo_stats {
     uint64_t ioprio_prefetch_fail;
     uint64_t ioprio_write_ok;
     uint64_t ioprio_write_fail;
+    uint64_t rwf_decode_attempts;
+    uint64_t rwf_decode_fail;
+    uint64_t rwf_prefetch_attempts;
+    uint64_t rwf_prefetch_fail;
+    uint64_t rwf_prefill_attempts;
+    uint64_t rwf_prefill_fail;
 };
 
 struct kairo_stats_snapshot {
@@ -113,6 +121,12 @@ struct kairo_stats_snapshot {
     uint64_t ioprio_prefetch_fail;
     uint64_t ioprio_write_ok;
     uint64_t ioprio_write_fail;
+    uint64_t rwf_decode_attempts;
+    uint64_t rwf_decode_fail;
+    uint64_t rwf_prefetch_attempts;
+    uint64_t rwf_prefetch_fail;
+    uint64_t rwf_prefill_attempts;
+    uint64_t rwf_prefill_fail;
 };
 
 struct kairo_worker_ctx {
@@ -202,6 +216,19 @@ static enum kairo_access_pattern parse_access_pattern(const char *value)
     exit(EXIT_FAILURE);
 }
 
+static enum kairo_hint_mode parse_hint_mode(const char *value)
+{
+    if (strcmp(value, "ioprio") == 0)
+        return KAIRO_HINT_MODE_IOPRIO;
+    if (strcmp(value, "rwf") == 0)
+        return KAIRO_HINT_MODE_RWF;
+    if (strcmp(value, "both") == 0)
+        return KAIRO_HINT_MODE_BOTH;
+
+    fprintf(stderr, "invalid hint-mode: %s\n", value);
+    exit(EXIT_FAILURE);
+}
+
 static void usage(const char *prog)
 {
     fprintf(stderr,
@@ -227,6 +254,7 @@ static void usage(const char *prog)
             "  --stride-blocks <n>       Blocks between strided accesses\n"
             "  --cluster-size-blocks <n> Blocks per cluster (clustered mode)\n"
             "  --fragment-size <B|K|M>   Fragment I/O into smaller chunks\n"
+            "  --hint-mode <name>        ioprio|rwf|both (default: ioprio)\n"
             "  --random-read             Default mode\n"
             "  --sequential-read         Disable random read placement\n"
             "  --buffered                Disable O_DIRECT\n",
@@ -377,6 +405,7 @@ static void set_defaults(struct kairo_config *cfg)
     cfg->stride_blocks = 16;
     cfg->cluster_size_blocks = 8;
     cfg->fragment_size_bytes = 0;
+    cfg->hint_mode = KAIRO_HINT_MODE_IOPRIO;
 }
 
 static void apply_mode_defaults(struct kairo_config *cfg)
@@ -451,6 +480,16 @@ static void apply_mode_defaults(struct kairo_config *cfg)
     default:
         break;
     }
+}
+
+static bool kairo_hint_mode_uses_ioprio(enum kairo_hint_mode mode)
+{
+    return mode == KAIRO_HINT_MODE_IOPRIO || mode == KAIRO_HINT_MODE_BOTH;
+}
+
+static bool kairo_hint_mode_uses_rwf(enum kairo_hint_mode mode)
+{
+    return mode == KAIRO_HINT_MODE_RWF || mode == KAIRO_HINT_MODE_BOTH;
 }
 
 static void validate_config(const struct kairo_config *cfg)
@@ -569,6 +608,32 @@ static void record_ioprio_result(struct kairo_stats *stats, enum kairo_worker_ki
     pthread_mutex_unlock(&stats->lock);
 }
 
+static void record_rwf_attempt(struct kairo_stats *stats, enum kairo_worker_kind kind, bool failed)
+{
+    pthread_mutex_lock(&stats->lock);
+    switch (kind) {
+    case KAIRO_WORKER_DECODE:
+        stats->rwf_decode_attempts++;
+        if (failed)
+            stats->rwf_decode_fail++;
+        break;
+    case KAIRO_WORKER_PREFETCH:
+        stats->rwf_prefetch_attempts++;
+        if (failed)
+            stats->rwf_prefetch_fail++;
+        break;
+    case KAIRO_WORKER_WRITE:
+        stats->rwf_prefill_attempts++;
+        if (failed)
+            stats->rwf_prefill_fail++;
+        break;
+    case KAIRO_WORKER_EVICT:
+    default:
+        break;
+    }
+    pthread_mutex_unlock(&stats->lock);
+}
+
 static void record_decode(struct kairo_stats *stats, double latency_us, size_t bytes)
 {
     pthread_mutex_lock(&stats->lock);
@@ -627,6 +692,12 @@ static void snapshot_stats(struct kairo_stats *stats, struct kairo_stats_snapsho
     snapshot->ioprio_prefetch_fail = stats->ioprio_prefetch_fail;
     snapshot->ioprio_write_ok = stats->ioprio_write_ok;
     snapshot->ioprio_write_fail = stats->ioprio_write_fail;
+    snapshot->rwf_decode_attempts = stats->rwf_decode_attempts;
+    snapshot->rwf_decode_fail = stats->rwf_decode_fail;
+    snapshot->rwf_prefetch_attempts = stats->rwf_prefetch_attempts;
+    snapshot->rwf_prefetch_fail = stats->rwf_prefetch_fail;
+    snapshot->rwf_prefill_attempts = stats->rwf_prefill_attempts;
+    snapshot->rwf_prefill_fail = stats->rwf_prefill_fail;
     pthread_mutex_unlock(&stats->lock);
 }
 
@@ -692,6 +763,78 @@ static int do_evict_op(struct kairo_worker_ctx *ctx, void *buffer, size_t block_
     return 0;
 }
 
+static uint64_t kairo_rwf_for_worker(enum kairo_worker_kind kind)
+{
+    switch (kind) {
+    case KAIRO_WORKER_DECODE:
+        return KAIRO_RWF_DECODE;
+    case KAIRO_WORKER_PREFETCH:
+        return KAIRO_RWF_PREFETCH;
+    case KAIRO_WORKER_WRITE:
+        return KAIRO_RWF_PREFILL;
+    case KAIRO_WORKER_EVICT:
+    default:
+        return 0;
+    }
+}
+
+static bool kairo_should_fallback_errno(int err)
+{
+    return err == EINVAL || err == EOPNOTSUPP || err == ENOSYS;
+}
+
+static ssize_t kairo_pread_with_hints(struct kairo_worker_ctx *ctx, void *buffer,
+                                      size_t io_size, off_t file_offset)
+{
+    struct iovec iov = {
+        .iov_base = buffer,
+        .iov_len = io_size,
+    };
+    const uint64_t rwf = kairo_rwf_for_worker(ctx->kind);
+
+    if (!kairo_hint_mode_uses_rwf(ctx->cfg->hint_mode) || rwf == 0)
+        return pread(ctx->fd, buffer, io_size, file_offset);
+
+    record_rwf_attempt(ctx->stats, ctx->kind, false);
+    errno = 0;
+    ssize_t rc = syscall(SYS_preadv2, ctx->fd, &iov, 1, (long)file_offset, (long)(file_offset >> 32), rwf);
+    if (rc >= 0)
+        return rc;
+
+    if (kairo_should_fallback_errno(errno)) {
+        record_rwf_attempt(ctx->stats, ctx->kind, true);
+        return pread(ctx->fd, buffer, io_size, file_offset);
+    }
+
+    return rc;
+}
+
+static ssize_t kairo_pwrite_with_hints(struct kairo_worker_ctx *ctx, void *buffer,
+                                       size_t io_size, off_t file_offset)
+{
+    struct iovec iov = {
+        .iov_base = buffer,
+        .iov_len = io_size,
+    };
+    const uint64_t rwf = kairo_rwf_for_worker(ctx->kind);
+
+    if (!kairo_hint_mode_uses_rwf(ctx->cfg->hint_mode) || rwf == 0)
+        return pwrite(ctx->fd, buffer, io_size, file_offset);
+
+    record_rwf_attempt(ctx->stats, ctx->kind, false);
+    errno = 0;
+    ssize_t rc = syscall(SYS_pwritev2, ctx->fd, &iov, 1, (long)file_offset, (long)(file_offset >> 32), rwf);
+    if (rc >= 0)
+        return rc;
+
+    if (kairo_should_fallback_errno(errno)) {
+        record_rwf_attempt(ctx->stats, ctx->kind, true);
+        return pwrite(ctx->fd, buffer, io_size, file_offset);
+    }
+
+    return rc;
+}
+
 static void *worker_main(void *arg)
 {
     struct kairo_worker_ctx *ctx = (struct kairo_worker_ctx *)arg;
@@ -705,16 +848,18 @@ static void *worker_main(void *arg)
     off_t op_index = 0;
     int memalign_rc;
 
-    if (set_current_ioprio(ctx->kind) != 0) {
-        record_ioprio_result(ctx->stats, ctx->kind, false);
-        fprintf(stderr,
-                "warning: ioprio_set failed for %s worker %u: %s. "
-                "Run with enough privilege if you need realtime-class signaling.\n",
-                worker_kind_name(ctx->kind),
-                ctx->worker_id,
-                strerror(errno));
-    } else {
-        record_ioprio_result(ctx->stats, ctx->kind, true);
+    if (kairo_hint_mode_uses_ioprio(ctx->cfg->hint_mode)) {
+        if (set_current_ioprio(ctx->kind) != 0) {
+            record_ioprio_result(ctx->stats, ctx->kind, false);
+            fprintf(stderr,
+                    "warning: ioprio_set failed for %s worker %u: %s. "
+                    "Run with enough privilege if you need realtime-class signaling.\n",
+                    worker_kind_name(ctx->kind),
+                    ctx->worker_id,
+                    strerror(errno));
+        } else {
+            record_ioprio_result(ctx->stats, ctx->kind, true);
+        }
     }
 
     memalign_rc = posix_memalign(&buffer, KAIRO_DIRECT_ALIGN, io_size);
@@ -749,7 +894,7 @@ static void *worker_main(void *arg)
         }
 
         if (ctx->kind == KAIRO_WORKER_WRITE) {
-            rc = pwrite(ctx->fd, buffer, io_size, file_offset);
+            rc = kairo_pwrite_with_hints(ctx, buffer, io_size, file_offset);
             if (rc < 0) {
                 perror("pwrite");
                 break;
@@ -774,7 +919,7 @@ static void *worker_main(void *arg)
                 perror("clock_gettime");
                 break;
             }
-            rc = pread(ctx->fd, buffer, io_size, file_offset);
+            rc = kairo_pread_with_hints(ctx, buffer, io_size, file_offset);
             if (clock_gettime(CLOCK_MONOTONIC, &end_ts) != 0) {
                 perror("clock_gettime");
                 break;
@@ -850,6 +995,7 @@ static void print_summary(const struct kairo_config *cfg, const struct kairo_sta
     puts("kairo_bench summary");
     printf("file=%s\n", cfg->file_path);
     printf("mode=%s\n", kairo_mode_name(cfg->mode));
+    printf("hint_mode=%s\n", kairo_hint_mode_name(cfg->hint_mode));
     printf("access_pattern=%s\n", kairo_access_pattern_name(cfg->access_pattern));
     printf("stride_blocks=%u\n", cfg->stride_blocks);
     printf("cluster_size_blocks=%u\n", cfg->cluster_size_blocks);
@@ -880,6 +1026,12 @@ static void print_summary(const struct kairo_config *cfg, const struct kairo_sta
     printf("ioprio_prefetch_fail=%" PRIu64 "\n", snapshot.ioprio_prefetch_fail);
     printf("ioprio_write_ok=%" PRIu64 "\n", snapshot.ioprio_write_ok);
     printf("ioprio_write_fail=%" PRIu64 "\n", snapshot.ioprio_write_fail);
+    printf("rwf_decode_attempts=%" PRIu64 "\n", snapshot.rwf_decode_attempts);
+    printf("rwf_decode_fail=%" PRIu64 "\n", snapshot.rwf_decode_fail);
+    printf("rwf_prefetch_attempts=%" PRIu64 "\n", snapshot.rwf_prefetch_attempts);
+    printf("rwf_prefetch_fail=%" PRIu64 "\n", snapshot.rwf_prefetch_fail);
+    printf("rwf_prefill_attempts=%" PRIu64 "\n", snapshot.rwf_prefill_attempts);
+    printf("rwf_prefill_fail=%" PRIu64 "\n", snapshot.rwf_prefill_fail);
     puts("todo=replace pthread pread/pwrite path with io_uring worker path");
 
     free(sorted);
@@ -920,6 +1072,7 @@ int main(int argc, char **argv)
         {"prefill-region-pct", required_argument, NULL, 'P'},
         {"decode-region-pct", required_argument, NULL, 'D'},
         {"access-pattern", required_argument, NULL, 'A'},
+        {"hint-mode", required_argument, NULL, 7},
         {"stride-blocks", required_argument, NULL, 4},
         {"cluster-size-blocks", required_argument, NULL, 5},
         {"fragment-size", required_argument, NULL, 6},
@@ -978,6 +1131,9 @@ int main(int argc, char **argv)
         case 'A':
             cfg.access_pattern = parse_access_pattern(optarg);
             cfg.random_read = (cfg.access_pattern == KAIRO_ACCESS_RANDOM);
+            break;
+        case 7:
+            cfg.hint_mode = parse_hint_mode(optarg);
             break;
         case 4:
             cfg.stride_blocks = (unsigned int)parse_size(optarg, "stride-blocks");

@@ -53,8 +53,48 @@ if ! grep -q 'enum kairo_io_class' "$PATCH_DIR/0002-rfc-kairo-request-classifica
   exit 1
 fi
 
+if ! grep -q 'kairo_classify_rq' "$PATCH_DIR/0002-rfc-kairo-request-classification.patch"; then
+  echo "[kairo] 0002 does not define kairo_classify_rq" >&2
+  exit 1
+fi
+
+if ! grep -Eq 'rq->kairo_hints\.io_class|explicit Kairo hints' "$PATCH_DIR/0002-rfc-kairo-request-classification.patch"; then
+  echo "[kairo] 0002 does not prioritize explicit Kairo hints before ioprio fallback" >&2
+  exit 1
+fi
+
+if ! grep -q 'RWF_KAIRO_DECODE' "$PATCH_DIR/0003-rfc-kairo-io-uring-hint-plumbing.patch"; then
+  echo "[kairo] 0003 does not define RWF_KAIRO_DECODE" >&2
+  exit 1
+fi
+
+if ! grep -q 'IOCB_KAIRO_DECODE' "$PATCH_DIR/0003-rfc-kairo-io-uring-hint-plumbing.patch"; then
+  echo "[kairo] 0003 does not define IOCB_KAIRO_DECODE" >&2
+  exit 1
+fi
+
+if ! grep -q 'kiocb_set_kairo_flags' "$PATCH_DIR/0003-rfc-kairo-io-uring-hint-plumbing.patch"; then
+  echo "[kairo] 0003 does not define kiocb_set_kairo_flags" >&2
+  exit 1
+fi
+
+if ! grep -q -- '--hint-mode' "$REPO_ROOT/bench/kairo_bench.c"; then
+  echo "[kairo] benchmark does not support --hint-mode" >&2
+  exit 1
+fi
+
 if ! grep -q 'kairo_decode_dispatches' "$PATCH_DIR/0009-rfc-kairo-sysfs-debug-counters.patch"; then
   echo "[kairo] 0009 does not expose kairo_decode_dispatches" >&2
+  exit 1
+fi
+
+if ! grep -q 'kairo_ioprio_hinted_requests' "$PATCH_DIR/0009-rfc-kairo-sysfs-debug-counters.patch"; then
+  echo "[kairo] 0009 does not reference kairo_ioprio_hinted_requests" >&2
+  exit 1
+fi
+
+if ! grep -q 'kairo_rwf_hinted_requests' "$PATCH_DIR/0009-rfc-kairo-sysfs-debug-counters.patch"; then
+  echo "[kairo] 0009 does not reference kairo_rwf_hinted_requests" >&2
   exit 1
 fi
 

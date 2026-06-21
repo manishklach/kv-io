@@ -1,3 +1,9 @@
+Stage 4 classification note:
+- explicit Kairo hints from the io_uring/kiocb/bio path must win before
+  temporary ioprio fallback
+- ioprio remains required for local benchmark continuity on unpatched kernels
+- request-op classification stays as the final fallback before normal I/O
+
 diff --git a/include/linux/blk_types.h b/include/linux/blk_types.h
 index f288c94..e2886d9 100755
 --- a/include/linux/blk_types.h
@@ -22,6 +28,15 @@ index f288c94..e2886d9 100755
 +	u32 flags;
 +};
 +
++/*
++ * Stage 4 direction:
++ *   kiocb flags -> bio Kairo class -> request Kairo hints
++ * Local helper names expected by the later patch stack:
++ *   kairo_class_from_kiocb()
++ *   bio_set_kairo_from_kiocb()
++ *   rq_set_kairo_from_bio()
++ */
++
  /*
   * From most significant bit:
   * 1 bit: reserved for other usage, see below
@@ -41,12 +56,9 @@ index 7a8150a..371d9d5 100755
  	return req->ioprio;
  }
  
-+static inline enum kairo_io_class kairo_classify_rq(struct request *rq)
++static inline enum kairo_io_class kairo_classify_rq_from_ioprio(struct request *rq)
 +{
 +	unsigned short ioprio = req_get_ioprio(rq);
-+
-+	if (req_op(rq) == REQ_OP_DISCARD || req_op(rq) == REQ_OP_WRITE_ZEROES)
-+		return KAIRO_IO_EVICT;
 +
 +	if (rq_data_dir(rq) == WRITE &&
 +	    IOPRIO_PRIO_CLASS(ioprio) == IOPRIO_CLASS_BE &&
@@ -67,6 +79,20 @@ index 7a8150a..371d9d5 100755
 +	    IOPRIO_PRIO_CLASS(ioprio) == IOPRIO_CLASS_BE &&
 +	    IOPRIO_PRIO_DATA(ioprio) == 7)
 +		return KAIRO_IO_PREFILL_WRITE;
++
++	return KAIRO_IO_NONE;
++}
++
++static inline enum kairo_io_class kairo_classify_rq(struct request *rq)
++{
++	if (rq->kairo_hints.io_class != KAIRO_IO_NONE)
++		return rq->kairo_hints.io_class;
++
++	if (kairo_classify_rq_from_ioprio(rq) != KAIRO_IO_NONE)
++		return kairo_classify_rq_from_ioprio(rq);
++
++	if (req_op(rq) == REQ_OP_DISCARD || req_op(rq) == REQ_OP_WRITE_ZEROES)
++		return KAIRO_IO_EVICT;
 +
 +	if (op_is_write(req_op(rq)) || rq_data_dir(rq) == READ)
 +		return KAIRO_IO_NORMAL;

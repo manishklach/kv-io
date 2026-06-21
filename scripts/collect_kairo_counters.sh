@@ -67,6 +67,10 @@ counter_names=(
   # general hint counters
   kairo_hinted_requests
   kairo_unhinted_requests
+  kairo_ioprio_hinted_requests
+  kairo_rwf_hinted_requests
+  kairo_bio_hinted_requests
+  kairo_hint_fallback_requests
 )
 
 for name in "${counter_names[@]}"; do

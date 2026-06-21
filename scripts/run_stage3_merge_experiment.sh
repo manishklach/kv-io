@@ -19,13 +19,16 @@ fi
 FILE="$1"
 DEV="$2"
 
-if [[ ! -x "$BENCH_DIR/kairo_bench" ]] && [[ ! -f "$BENCH_DIR/kairo_bench.c" ]]; then
-  echo "error: kairo_bench not found in $BENCH_DIR" >&2
-  echo "Build it first: cd $BENCH_DIR && make kairo_bench" >&2
+if [[ ! -x "$BENCH_DIR/kairo_bench" ]] && [[ ! -x "$REPO_ROOT/kairo_bench" ]] && [[ ! -f "$BENCH_DIR/kairo_bench.c" ]]; then
+  echo "error: kairo_bench not found in $BENCH_DIR or $REPO_ROOT" >&2
+  echo "Build it first: gcc -O2 -Wall -pthread -Iinclude -o kairo_bench bench/kairo_bench.c" >&2
   exit 1
 fi
 
 BENCH="$BENCH_DIR/kairo_bench"
+if [[ ! -x "$BENCH" ]] && [[ -x "$REPO_ROOT/kairo_bench" ]]; then
+  BENCH="$REPO_ROOT/kairo_bench"
+fi
 if [[ ! -x "$BENCH" ]]; then
   echo "warning: kairo_bench not compiled, using source path" >&2
   BENCH="$BENCH_DIR/kairo_bench.c"
@@ -44,6 +47,14 @@ run_case() {
 
   local case_dir="$RESULTS_DIR/$case_name"
   mkdir -p "$case_dir"
+
+  if [[ -w "/sys/block/$DEV/queue/iosched/kairo_enable" ]]; then
+    echo "$kairo_enable" | sudo tee "/sys/block/$DEV/queue/iosched/kairo_enable" >/dev/null
+  fi
+
+  if [[ -w "/sys/block/$DEV/queue/iosched/kairo_merge_bias_enable" ]]; then
+    echo "$merge_bias" | sudo tee "/sys/block/$DEV/queue/iosched/kairo_merge_bias_enable" >/dev/null
+  fi
 
   # collect before-counters
   "$COLLECT" "$DEV" "$case_dir/before" 2>/dev/null || true
@@ -148,10 +159,11 @@ for case_dir in "$RESULTS_DIR"/*/; do
       for counter in kairo_merge_attempts kairo_merge_successes \
                      kairo_decode_merge_successes kairo_prefetch_merge_successes \
                      kairo_small_decode_reads kairo_large_decode_reads; do
-        local before_val=0 after_val=0
+        before_val=0
+        after_val=0
         [[ -f "$case_dir/before/$counter.txt" ]] && before_val=$(cat "$case_dir/before/$counter.txt" 2>/dev/null || echo 0)
         [[ -f "$case_dir/after/$counter.txt" ]] && after_val=$(cat "$case_dir/after/$counter.txt" 2>/dev/null || echo 0)
-        local delta=$(( after_val - before_val ))
+        delta=$(( after_val - before_val ))
         echo "${counter}_delta=${delta}"
       done
     fi

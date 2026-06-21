@@ -11,7 +11,7 @@ local research prototype, not an upstream submission plan.
 | --- | --- | --- | --- |
 | `0001` | decode priority | `block/mq-deadline.c` | decode-read fast path |
 | `0002` | request classification | `blk-mq` headers/core | internal Kairo I/O classes and merge-instrumentation flags |
-| `0003` | io_uring hint plumbing | `io_uring`, `fs` | experimental intent propagation |
+| `0003` | io_uring hint plumbing | `io_uring`, `fs`, `blk-mq` metadata | experimental intent propagation from userspace to `kiocb` and conceptual `bio/request` metadata |
 | `0004` | large-block coalescing | `blk-merge`, `blk-mq` | merge-bias helpers, per-request merge flags, request-size observability |
 | `0005` | prefetch deadlines | `mq-deadline` | separate prefetch urgency |
 | `0006` | ephemeral semantics | `fs`, `mm`, `block` | recomputable KV-cache behavior |
@@ -32,8 +32,9 @@ local research prototype, not an upstream submission plan.
 
 ## Temporary Implementation Strategy
 
-- current benchmark signaling relies on `ioprio`
-- `0003` sketches an experimental `RWF_KAIRO_*` flow for future `io_uring` use
+- current benchmark signaling still relies on `ioprio` by default
+- `0003` strengthens the local `RWF_KAIRO_*` flow for future `io_uring` use
+- Stage 4 benchmark runs can switch between `--hint-mode ioprio|rwf|both`
 - later patches intentionally add local-only request metadata to show where Kairo semantics would live
 - NVMe backend mapping remains feature-detected and optional
 - merge instrumentation uses per-request flags (`KAIRO_HINT_MERGE_ATTEMPTED`, `KAIRO_HINT_MERGE_SUCCESS`)
@@ -54,5 +55,6 @@ Immediate validation remains centered on:
 - exact request lifetime for extra metadata inside `struct request`
 - whether merge bias belongs in generic `blk-merge` or only in Kairo-classified paths
 - whether `RWF_KAIRO_*` should stay RFC-only or move to a different local hint path
+- how much of the Stage 4 scaffold should live in `kiocb` versus direct `bio` metadata
 - whether the request-size histogram is better served by debugfs snapshots
 - how much value generic NVMe Streams/FDP/ZNS mapping provides without workload-specific placement control

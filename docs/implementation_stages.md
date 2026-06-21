@@ -52,9 +52,13 @@
 - Patches involved: `0003`
 - What should compile:
   - experimental `RWF_KAIRO_*` and `kiocb` plumbing
+  - conceptual `kiocb` -> `bio` -> `request` Kairo metadata helpers
 - What should be measurable:
-  - user-space hint path readiness versus current `ioprio` fallback
+  - benchmark `--hint-mode ioprio|rwf|both`
+  - `rwf_*_{attempts,fail}` counters in the benchmark summary
+  - staged hint-source counters such as `kairo_ioprio_hinted_requests`
 - What is still RFC-only:
+  - scaffolded / local RFC, not compile-validated
   - final local interface choice for hint propagation
 
 ## Stage 5
