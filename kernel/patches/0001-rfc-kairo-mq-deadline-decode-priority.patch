@@ -1,0 +1,93 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kairo RFC/POC <local@kairo.invalid>
+Date: Sun, 21 Jun 2026 00:00:00 +0000
+Subject: [RFC/POC] mq-deadline: add experimental Kairo decode-read priority
+
+This local RFC/POC patch sketches the first Kairo scheduler experiment:
+classify decode-critical KV-cache reads using existing ioprio metadata and
+prefer them in mq-deadline dispatch before lower-priority background traffic.
+
+This is not intended for LKML submission. The ioprio mapping is an internal
+prototype signal, not a permanent UAPI.
+
+Temporary classification:
+
+  IOPRIO_CLASS_RT, prio 0, READ  -> KAIRO_DECODE_READ
+  IOPRIO_CLASS_RT, prio 1, READ  -> KAIRO_PREFETCH_READ
+  IOPRIO_CLASS_BE, prio 7, WRITE -> KAIRO_PREFILL_WRITE
+
+The exact insertion points may need adjustment for the target kernel version.
+---
+ block/mq-deadline.c | 64 ++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 64 insertions(+)
+
+diff --git a/block/mq-deadline.c b/block/mq-deadline.c
+index 000000000000..111111111111 100644
+--- a/block/mq-deadline.c
++++ b/block/mq-deadline.c
+@@ -1,3 +1,67 @@
++/*
++ * Kairo RFC/POC notes:
++ *
++ * This patch is intentionally scaffold-level. It documents the local
++ * scheduler logic to be wired into mq-deadline on the target kernel tree.
++ * The final placement depends on the exact Linux version being patched.
++ */
++
++#include <linux/ioprio.h>
++
++static bool kairo_enable = true;
++static unsigned int kairo_decode_budget = 32;
++
++static inline bool dd_kairo_is_decode_read(struct request *rq)
++{
++	unsigned short ioprio = req_get_ioprio(rq);
++
++	return rq_data_dir(rq) == READ &&
++	       IOPRIO_PRIO_CLASS(ioprio) == IOPRIO_CLASS_RT &&
++	       IOPRIO_PRIO_DATA(ioprio) == 0;
++}
++
++static inline bool dd_kairo_is_prefetch_read(struct request *rq)
++{
++	unsigned short ioprio = req_get_ioprio(rq);
++
++	return rq_data_dir(rq) == READ &&
++	       IOPRIO_PRIO_CLASS(ioprio) == IOPRIO_CLASS_RT &&
++	       IOPRIO_PRIO_DATA(ioprio) == 1;
++}
++
++static inline bool dd_kairo_is_prefill_write(struct request *rq)
++{
++	unsigned short ioprio = req_get_ioprio(rq);
++
++	return rq_data_dir(rq) == WRITE &&
++	       IOPRIO_PRIO_CLASS(ioprio) == IOPRIO_CLASS_BE &&
++	       IOPRIO_PRIO_DATA(ioprio) == 7;
++}
++
++/*
++ * Intended dispatch policy:
++ *
++ * 1. If Kairo mode is disabled, preserve existing mq-deadline behavior.
++ * 2. If a decode-critical read exists and decode budget remains, dispatch it.
++ * 3. If prefetch reads are approaching deadline, prefer them after decode.
++ * 4. Fall back to existing mq-deadline read/write logic.
++ * 5. Preserve write progress with starvation/deadline escape behavior.
++ *
++ * Pseudocode insertion point inside the mq-deadline dispatch function:
++ *
++ *   if (kairo_enable) {
++ *       rq = dd_kairo_next_decode_read(dd);
++ *       if (rq && dd->kairo_decode_dispatches < kairo_decode_budget)
++ *           return dd_dispatch_request(q, rq);
++ *   }
++ *
++ * TODO:
++ * - Add a real decode-read lane or tree scan based on target mq-deadline code.
++ * - Add starvation accounting.
++ * - Add sysfs/debugfs stats.
++ * - Reset decode budget per dispatch epoch.
++ */
++
+ /* existing mq-deadline code continues below in the target kernel tree */
