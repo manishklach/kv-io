@@ -379,27 +379,24 @@ static double percentile_from_sorted(const double *values, uint64_t count, doubl
     return values[index];
 }
 
-static int set_current_ioprio(enum kairo_worker_kind kind)
+static int ioprio_value_for_worker_kind(enum kairo_worker_kind kind)
 {
-    int prio;
-
     switch (kind) {
     case KAIRO_WORKER_DECODE:
-        prio = IOPRIO_PRIO_VALUE(IOPRIO_CLASS_RT, KAIRO_CLASS_DECODE_READ);
-        break;
+        return IOPRIO_PRIO_VALUE(IOPRIO_CLASS_RT, KAIRO_CLASS_DECODE_READ);
     case KAIRO_WORKER_PREFETCH:
-        prio = IOPRIO_PRIO_VALUE(IOPRIO_CLASS_RT, KAIRO_CLASS_PREFETCH_READ);
-        break;
+        return IOPRIO_PRIO_VALUE(IOPRIO_CLASS_RT, KAIRO_CLASS_PREFETCH_READ);
     case KAIRO_WORKER_EVICT:
-        prio = IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 6);
-        break;
+        return IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 6);
     case KAIRO_WORKER_WRITE:
     default:
-        prio = IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 7);
-        break;
+        return IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 7);
     }
+}
 
-    return syscall(SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0, prio);
+static int set_current_ioprio(enum kairo_worker_kind kind)
+{
+    return syscall(SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0, ioprio_value_for_worker_kind(kind));
 }
 
 static const char *worker_kind_name(enum kairo_worker_kind kind)
