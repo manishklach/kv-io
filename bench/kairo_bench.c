@@ -38,6 +38,15 @@ enum kairo_mode {
     KAIRO_MODE_PREFETCH_PRESSURE = 2,
     KAIRO_MODE_EVICTION_PRESSURE = 3,
     KAIRO_MODE_MULTISESSION = 4,
+    KAIRO_MODE_MERGE_FRIENDLY = 5,
+    KAIRO_MODE_MERGE_HOSTILE = 6,
+};
+
+enum kairo_access_pattern {
+    KAIRO_ACCESS_RANDOM = 0,
+    KAIRO_ACCESS_SEQUENTIAL = 1,
+    KAIRO_ACCESS_STRIDED = 2,
+    KAIRO_ACCESS_CLUSTERED = 3,
 };
 
 struct kairo_config {
@@ -57,6 +66,10 @@ struct kairo_config {
     enum kairo_mode mode;
     bool use_direct;
     bool random_read;
+    enum kairo_access_pattern access_pattern;
+    unsigned int stride_blocks;
+    unsigned int cluster_size_blocks;
+    size_t fragment_size_bytes;
 };
 
 struct kairo_stats {
@@ -128,8 +141,28 @@ static const char *kairo_mode_name(enum kairo_mode mode)
         return "eviction-pressure";
     case KAIRO_MODE_MULTISESSION:
         return "multisession";
+    case KAIRO_MODE_MERGE_FRIENDLY:
+        return "merge-friendly";
+    case KAIRO_MODE_MERGE_HOSTILE:
+        return "merge-hostile";
     default:
         return "mixed";
+    }
+}
+
+static const char *kairo_access_pattern_name(enum kairo_access_pattern p)
+{
+    switch (p) {
+    case KAIRO_ACCESS_RANDOM:
+        return "random";
+    case KAIRO_ACCESS_SEQUENTIAL:
+        return "sequential";
+    case KAIRO_ACCESS_STRIDED:
+        return "strided";
+    case KAIRO_ACCESS_CLUSTERED:
+        return "clustered";
+    default:
+        return "random";
     }
 }
 
@@ -145,8 +178,27 @@ static enum kairo_mode parse_mode(const char *value)
         return KAIRO_MODE_EVICTION_PRESSURE;
     if (strcmp(value, "multisession") == 0)
         return KAIRO_MODE_MULTISESSION;
+    if (strcmp(value, "merge-friendly") == 0)
+        return KAIRO_MODE_MERGE_FRIENDLY;
+    if (strcmp(value, "merge-hostile") == 0)
+        return KAIRO_MODE_MERGE_HOSTILE;
 
     fprintf(stderr, "invalid mode: %s\n", value);
+    exit(EXIT_FAILURE);
+}
+
+static enum kairo_access_pattern parse_access_pattern(const char *value)
+{
+    if (strcmp(value, "random") == 0)
+        return KAIRO_ACCESS_RANDOM;
+    if (strcmp(value, "sequential") == 0)
+        return KAIRO_ACCESS_SEQUENTIAL;
+    if (strcmp(value, "strided") == 0)
+        return KAIRO_ACCESS_STRIDED;
+    if (strcmp(value, "clustered") == 0)
+        return KAIRO_ACCESS_CLUSTERED;
+
+    fprintf(stderr, "invalid access-pattern: %s\n", value);
     exit(EXIT_FAILURE);
 }
 
@@ -155,7 +207,9 @@ static void usage(const char *prog)
     fprintf(stderr,
             "Usage: %s --file <path> [options]\n"
             "  --file <path>             Target file path\n"
-            "  --mode <name>             decode-only|mixed|prefetch-pressure|eviction-pressure|multisession\n"
+            "  --mode <name>             decode-only|mixed|prefetch-pressure|\n"
+            "                            eviction-pressure|multisession|\n"
+            "                            merge-friendly|merge-hostile\n"
             "  --size <bytes|K|M|G>      File size, default 8G\n"
             "  --block-size <bytes|K|M|G>\n"
             "                            I/O block size, default 1M\n"
@@ -169,6 +223,10 @@ static void usage(const char *prog)
             "  --decode-region-pct <n>   Default 33\n"
             "  --runtime <sec>           Default 60\n"
             "  --queue-depth <n>         Placeholder for future io_uring path\n"
+            "  --access-pattern <name>   random|sequential|strided|clustered\n"
+            "  --stride-blocks <n>       Blocks between strided accesses\n"
+            "  --cluster-size-blocks <n> Blocks per cluster (clustered mode)\n"
+            "  --fragment-size <B|K|M>   Fragment I/O into smaller chunks\n"
             "  --random-read             Default mode\n"
             "  --sequential-read         Disable random read placement\n"
             "  --buffered                Disable O_DIRECT\n",
@@ -315,6 +373,10 @@ static void set_defaults(struct kairo_config *cfg)
     cfg->mode = KAIRO_MODE_MIXED;
     cfg->use_direct = true;
     cfg->random_read = true;
+    cfg->access_pattern = KAIRO_ACCESS_RANDOM;
+    cfg->stride_blocks = 16;
+    cfg->cluster_size_blocks = 8;
+    cfg->fragment_size_bytes = 0;
 }
 
 static void apply_mode_defaults(struct kairo_config *cfg)
@@ -357,6 +419,34 @@ static void apply_mode_defaults(struct kairo_config *cfg)
         if (cfg->evict_threads == 0)
             cfg->evict_threads = 1;
         break;
+    case KAIRO_MODE_MERGE_FRIENDLY:
+        cfg->access_pattern = KAIRO_ACCESS_SEQUENTIAL;
+        if (cfg->decode_threads < 4)
+            cfg->decode_threads = 4;
+        if (cfg->prefetch_threads == 0)
+            cfg->prefetch_threads = 2;
+        if (cfg->write_threads == 0)
+            cfg->write_threads = 2;
+        cfg->random_read = false;
+        cfg->decode_region_pct = 50;
+        cfg->prefill_region_pct = 25;
+        break;
+    case KAIRO_MODE_MERGE_HOSTILE:
+        cfg->access_pattern = KAIRO_ACCESS_RANDOM;
+        if (cfg->sessions < 4)
+            cfg->sessions = 4;
+        if (cfg->models < 2)
+            cfg->models = 2;
+        if (cfg->decode_threads < 4)
+            cfg->decode_threads = 4;
+        if (cfg->prefetch_threads < 2)
+            cfg->prefetch_threads = 2;
+        if (cfg->fragment_size_bytes == 0)
+            cfg->fragment_size_bytes = 4096;
+        cfg->random_read = true;
+        cfg->decode_region_pct = 25;
+        cfg->prefill_region_pct = 25;
+        break;
     case KAIRO_MODE_MIXED:
     default:
         break;
@@ -395,6 +485,10 @@ static void validate_config(const struct kairo_config *cfg)
     if (cfg->decode_region_pct > 100 || cfg->prefill_region_pct > 100 ||
         cfg->decode_region_pct + cfg->prefill_region_pct > 100) {
         fprintf(stderr, "invalid region percentages\n");
+        exit(EXIT_FAILURE);
+    }
+    if (cfg->fragment_size_bytes > 0 && cfg->fragment_size_bytes >= cfg->block_size_bytes) {
+        fprintf(stderr, "--fragment-size must be smaller than --block-size\n");
         exit(EXIT_FAILURE);
     }
 }
@@ -540,6 +634,32 @@ static off_t next_read_block(const struct kairo_worker_ctx *ctx, off_t op_index,
 {
     unsigned int session_seed = ctx->session_id * 131;
     unsigned int model_seed = ctx->model_id * 977;
+    off_t base;
+
+    switch (ctx->cfg->access_pattern) {
+    case KAIRO_ACCESS_SEQUENTIAL:
+        return op_index % block_count;
+
+    case KAIRO_ACCESS_STRIDED: {
+        off_t stride = (off_t)ctx->cfg->stride_blocks;
+        if (stride < 1)
+            stride = 1;
+        return (op_index * stride) % block_count;
+    }
+
+    case KAIRO_ACCESS_CLUSTERED: {
+        off_t cluster = (off_t)ctx->cfg->cluster_size_blocks;
+        if (cluster < 1)
+            cluster = 1;
+        off_t cluster_idx = (op_index / cluster) % block_count;
+        off_t offset = op_index % cluster;
+        return (cluster_idx + offset) % block_count;
+    }
+
+    case KAIRO_ACCESS_RANDOM:
+    default:
+        break;
+    }
 
     if (!ctx->cfg->random_read)
         return op_index % block_count;
@@ -578,7 +698,11 @@ static void *worker_main(void *arg)
     struct kairo_worker_ctx *ctx = (struct kairo_worker_ctx *)arg;
     void *buffer = NULL;
     size_t block_size = ctx->cfg->block_size_bytes;
+    size_t io_size = ctx->cfg->fragment_size_bytes > 0
+                        ? ctx->cfg->fragment_size_bytes
+                        : block_size;
     off_t block_count = (off_t)(ctx->region_length / (off_t)block_size);
+    off_t fragments_per_block = block_size / io_size;
     off_t op_index = 0;
     int memalign_rc;
 
@@ -594,14 +718,14 @@ static void *worker_main(void *arg)
         record_ioprio_result(ctx->stats, ctx->kind, true);
     }
 
-    memalign_rc = posix_memalign(&buffer, KAIRO_DIRECT_ALIGN, block_size);
+    memalign_rc = posix_memalign(&buffer, KAIRO_DIRECT_ALIGN, io_size);
     if (memalign_rc != 0) {
         fprintf(stderr, "posix_memalign failed for %s worker %u: %s\n",
                 worker_kind_name(ctx->kind), ctx->worker_id, strerror(memalign_rc));
         return (void *)1;
     }
 
-    memset(buffer, ctx->kind == KAIRO_WORKER_WRITE ? ('A' + (ctx->worker_id % 26)) : 0, block_size);
+    memset(buffer, ctx->kind == KAIRO_WORKER_WRITE ? ('A' + (ctx->worker_id % 26)) : 0, io_size);
 
     while (!*(ctx->stop)) {
         off_t block_offset;
@@ -616,22 +740,29 @@ static void *worker_main(void *arg)
         else
             block_offset = next_read_block(ctx, op_index, block_count);
 
-        file_offset = ctx->region_start + (block_offset * (off_t)block_size);
+        if (ctx->cfg->fragment_size_bytes > 0 && ctx->kind != KAIRO_WORKER_WRITE) {
+            off_t frag = op_index % fragments_per_block;
+            file_offset = ctx->region_start
+                        + (block_offset * (off_t)block_size)
+                        + (frag * (off_t)io_size);
+        } else {
+            file_offset = ctx->region_start + (block_offset * (off_t)block_size);
+        }
 
         if (ctx->kind == KAIRO_WORKER_WRITE) {
-            rc = pwrite(ctx->fd, buffer, block_size, file_offset);
+            rc = pwrite(ctx->fd, buffer, io_size, file_offset);
             if (rc < 0) {
                 perror("pwrite");
                 break;
             }
-            if ((size_t)rc != block_size) {
+            if ((size_t)rc != io_size) {
                 fprintf(stderr, "short write on %s worker %u: expected %zu got %zd\n",
-                        worker_kind_name(ctx->kind), ctx->worker_id, block_size, rc);
+                        worker_kind_name(ctx->kind), ctx->worker_id, io_size, rc);
                 break;
             }
-            record_write(ctx->stats, block_size);
+            record_write(ctx->stats, io_size);
         } else if (ctx->kind == KAIRO_WORKER_EVICT) {
-            if (do_evict_op(ctx, buffer, block_size, file_offset) != 0) {
+            if (do_evict_op(ctx, buffer, io_size, file_offset) != 0) {
                 perror("evict");
                 break;
             }
@@ -644,7 +775,7 @@ static void *worker_main(void *arg)
                 perror("clock_gettime");
                 break;
             }
-            rc = pread(ctx->fd, buffer, block_size, file_offset);
+            rc = pread(ctx->fd, buffer, io_size, file_offset);
             if (clock_gettime(CLOCK_MONOTONIC, &end_ts) != 0) {
                 perror("clock_gettime");
                 break;
@@ -653,17 +784,17 @@ static void *worker_main(void *arg)
                 perror("pread");
                 break;
             }
-            if ((size_t)rc != block_size) {
+            if ((size_t)rc != io_size) {
                 fprintf(stderr, "short read on %s worker %u: expected %zu got %zd\n",
-                        worker_kind_name(ctx->kind), ctx->worker_id, block_size, rc);
+                        worker_kind_name(ctx->kind), ctx->worker_id, io_size, rc);
                 break;
             }
 
             latency_us = timespec_diff_us(&start_ts, &end_ts);
             if (ctx->kind == KAIRO_WORKER_DECODE)
-                record_decode(ctx->stats, latency_us, block_size);
+                record_decode(ctx->stats, latency_us, io_size);
             else
-                record_prefetch(ctx->stats, block_size);
+                record_prefetch(ctx->stats, io_size);
         }
 
         op_index++;
@@ -720,6 +851,11 @@ static void print_summary(const struct kairo_config *cfg, const struct kairo_sta
     puts("kairo_bench summary");
     printf("file=%s\n", cfg->file_path);
     printf("mode=%s\n", kairo_mode_name(cfg->mode));
+    printf("access_pattern=%s\n", kairo_access_pattern_name(cfg->access_pattern));
+    printf("stride_blocks=%u\n", cfg->stride_blocks);
+    printf("cluster_size_blocks=%u\n", cfg->cluster_size_blocks);
+    printf("fragment_size_bytes=%zu\n", cfg->fragment_size_bytes);
+    printf("block_size_bytes=%zu\n", cfg->block_size_bytes);
     printf("sessions=%u\n", cfg->sessions);
     printf("models=%u\n", cfg->models);
     printf("decode_threads=%u\n", cfg->decode_threads);
@@ -784,6 +920,10 @@ int main(int argc, char **argv)
         {"models", required_argument, NULL, 'M'},
         {"prefill-region-pct", required_argument, NULL, 'P'},
         {"decode-region-pct", required_argument, NULL, 'D'},
+        {"access-pattern", required_argument, NULL, 'A'},
+        {"stride-blocks", required_argument, NULL, 4},
+        {"cluster-size-blocks", required_argument, NULL, 5},
+        {"fragment-size", required_argument, NULL, 6},
         {"random-read", no_argument, NULL, 1},
         {"sequential-read", no_argument, NULL, 2},
         {"buffered", no_argument, NULL, 3},
@@ -792,7 +932,7 @@ int main(int argc, char **argv)
 
     set_defaults(&cfg);
 
-    while ((opt = getopt_long(argc, argv, "f:m:s:b:d:p:w:e:t:q:S:M:P:D:", long_options, &option_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, "f:m:s:b:d:p:w:e:t:q:S:M:P:D:A:", long_options, &option_index)) != -1) {
         switch (opt) {
         case 'f':
             cfg.file_path = optarg;
@@ -836,11 +976,26 @@ int main(int argc, char **argv)
         case 'D':
             cfg.decode_region_pct = (unsigned int)parse_size(optarg, "decode-region-pct");
             break;
+        case 'A':
+            cfg.access_pattern = parse_access_pattern(optarg);
+            cfg.random_read = (cfg.access_pattern == KAIRO_ACCESS_RANDOM);
+            break;
+        case 4:
+            cfg.stride_blocks = (unsigned int)parse_size(optarg, "stride-blocks");
+            break;
+        case 5:
+            cfg.cluster_size_blocks = (unsigned int)parse_size(optarg, "cluster-size-blocks");
+            break;
+        case 6:
+            cfg.fragment_size_bytes = (size_t)parse_size(optarg, "fragment-size");
+            break;
         case 1:
             cfg.random_read = true;
+            cfg.access_pattern = KAIRO_ACCESS_RANDOM;
             break;
         case 2:
             cfg.random_read = false;
+            cfg.access_pattern = KAIRO_ACCESS_SEQUENTIAL;
             break;
         case 3:
             cfg.use_direct = false;

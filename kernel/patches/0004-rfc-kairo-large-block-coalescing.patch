@@ -7,70 +7,155 @@ Subsystem touched:
 - `block/blk-merge.c`
 - `block/blk-mq.c`
 - `include/linux/blkdev.h`
+- `include/linux/blk_types.h`
 
 New Kairo concept:
 - Kairo-classified decode and prefetch reads should bias toward larger merged
   requests without breaking queue limits
+- per-request merge-instrumentation flags let the scheduler observe whether
+  Kairo reads are coalescing successfully
 
 Relation to AI KV-cache traffic:
 - KV-cache reads tend to be large-block and semi-sequential, so fragmentation in
   the generic path can inflate tail latency and device overhead
+- merge-friendly and merge-hostile access patterns need to be observable
 
 Temporary implementation:
-- conservative merge bias helper around existing merge checks
+- conservative merge-bias helpers around existing blk-merge safety checks
+- per-request flags (`KAIRO_HINT_MERGE_ATTEMPTED`, `KAIRO_HINT_MERGE_SUCCESS`)
+  set during `attempt_merge` and `blk_mq_bio_merge` so the scheduler can
+  accumulate aggregate merge counters at dispatch time
+
+Safety notes (RFC/POC):
+Kairo merge bias must not bypass:
+- max sectors / max segments
+- segment limits / integrity constraints
+- zone constraints / bio compatibility
+- existing blk-merge safety rules
 
 Still to validate:
-- whether the merge bias should be device-specific or generic across all queues
+- whether merge bias is best placed in generic blk-merge or in a Kairo-specific
+  scheduler hook
+- whether per-request flags survive request recycling correctly
 
+diff --git a/include/linux/blk_types.h b/include/linux/blk_types.h
+index 631af67..73b9f2d 100644
+--- a/include/linux/blk_types.h
++++ b/include/linux/blk_types.h
+@@
++/*
++ * Per-request Kairo merge-instrumentation flags.
++ * Set in the blk-merge path, consumed by the scheduler at dispatch time.
++ */
++#define KAIRO_HINT_MERGE_ATTEMPTED	BIT(0)
++#define KAIRO_HINT_MERGE_SUCCESS	BIT(1)
++
+  struct kairo_request_hints {
+  	enum kairo_io_class io_class;
+  	u64 kairo_deadline_ns;
+@@
++static inline bool kairo_is_merge_candidate(struct request *rq, struct bio *bio)
++{
++	if (!rq->kairo_hints.io_class)
++		return false;
++	if (bio_data_dir(bio) != rq_data_dir(rq))
++		return false;
++	if (req_op(rq) != bio_op(bio))
++		return false;
++	return true;
++}
++
++static inline bool kairo_should_bias_merge(struct request *rq, struct bio *bio)
++{
++	enum kairo_io_class rq_class = rq->kairo_hints.io_class;
++	unsigned int sectors = blk_rq_sectors(rq) + bio_sectors(bio);
++
++	/* Only bias for Kairo-classified reads */
++	if (rq_class != KAIRO_IO_DECODE_READ &&
++	    rq_class != KAIRO_IO_PREFETCH_READ)
++		return false;
++
++	/* Do not exceed the Kairo large-read target */
++	if (sectors > (KAIRO_MERGE_BIAS_SECTORS >> 9))
++		return false;
++
++	return true;
++}
++
++static inline bool kairo_merge_within_limits(struct request_queue *q,
++					      struct request *rq,
++					      struct bio *bio)
++{
++	unsigned int sectors = blk_rq_sectors(rq) + bio_sectors(bio);
++
++	if (sectors > queue_max_hw_sectors(q))
++		return false;
++	if (sectors > queue_max_segment_size(q) >> 9)
++		return false;
++	return true;
++}
++
 diff --git a/include/linux/blkdev.h b/include/linux/blkdev.h
 index 6aa1cb0..85b9031 100644
 --- a/include/linux/blkdev.h
 +++ b/include/linux/blkdev.h
 @@
-+#define KAIRO_MERGE_BIAS_SECTORS	4096
++#define KAIRO_MERGE_BIAS_SECTORS	4096	/* 2 MiB in 512-byte sectors */
 +
- diff --git a/block/blk-merge.c b/block/blk-merge.c
- index 7f24b70..b987ab2 100644
- --- a/block/blk-merge.c
- +++ b/block/blk-merge.c
- @@
-+static bool kairo_should_bias_merge(struct request *rq, struct bio *bio)
-+{
-+	enum kairo_io_class rq_class = rq->kairo_hints.io_class;
-+	unsigned int sectors = blk_rq_sectors(rq) + bio_sectors(bio);
-+
-+	if (rq_class != KAIRO_IO_DECODE_READ &&
-+	    rq_class != KAIRO_IO_PREFETCH_READ)
-+		return false;
-+
-+	if (sectors > KAIRO_MERGE_BIAS_SECTORS)
-+		return false;
-+
-+	/*
-+	 * RFC/POC rule:
-+	 * keep normal queue limit checks and incompatibility checks intact,
-+	 * only bias the decision when the resulting large request still fits.
-+	 */
-+	return true;
-+}
+diff --git a/block/blk-merge.c b/block/blk-merge.c
+index 7f24b70..b987ab2 100644
+--- a/block/blk-merge.c
++++ b/block/blk-merge.c
 @@
-  static struct request *attempt_merge(struct request_queue *q, struct request *rq,
-  				     struct bio *bio)
-  {
-+	if (kairo_should_bias_merge(rq, bio))
-+		rq->kairo_hints.flags |= BIT(0);
-  	...
-  }
-
- diff --git a/block/blk-mq.c b/block/blk-mq.c
- index 4ef6033..18fd0e3 100644
- --- a/block/blk-mq.c
- +++ b/block/blk-mq.c
- @@
+ static struct request *attempt_merge(struct request_queue *q,
+ 				     struct request *rq, struct bio *bio)
+ {
++	/*
++	 * RFC/POC: Kairo merge-instrumentation flags.
++	 *
++	 * These flags are set per-request so the mq-deadline scheduler can
++	 * accumulate aggregate merge counters at dispatch time without
++	 * requiring a direct counter path from blk-merge to the scheduler.
++	 *
++	 * We only flag Kairo-classified requests that pass the basic merge
++	 * candidate check.  The actual merge decision is still governed by
++	 * the existing blk-merge safety rules below.
++	 */
++	if (kairo_is_merge_candidate(rq, bio)) {
++		rq->kairo_hints.flags |= KAIRO_HINT_MERGE_ATTEMPTED;
++		if (kairo_should_bias_merge(rq, bio) &&
++		    kairo_merge_within_limits(q, rq, bio)) {
++			/*
++			 * Bias hint: encourage the existing merge logic to
++			 * complete this merge when the resulting request is
++			 * still a large-but-safe KV-cache read.
++			 */
++		}
++	}
+ 	...
+ }
+@@
++	if (rq->kairo_hints.flags & KAIRO_HINT_MERGE_ATTEMPTED) {
++		/*
++		 * If blk-merge's attempt_merge succeeded, mark success so
++		 * the scheduler can count it.
++		 */
++		rq->kairo_hints.flags |= KAIRO_HINT_MERGE_SUCCESS;
++	}
++
+diff --git a/block/blk-mq.c b/block/blk-mq.c
+index 4ef6033..18fd0e3 100644
+--- a/block/blk-mq.c
++++ b/block/blk-mq.c
+@@
++	/*
++	 * RFC/POC: Kairo request-shape instrumentation at merge time.
++	 *
++	 * When a bio is merged into an existing Kairo-classified request,
++	 * we preserve the Kairo hint so the scheduler can later observe
++	 * whether decode/prefetch reads become larger, coalesced requests.
++	 */
 +	if (rq->kairo_hints.io_class == KAIRO_IO_DECODE_READ ||
 +	    rq->kairo_hints.io_class == KAIRO_IO_PREFETCH_READ) {
-+		/*
-+		 * Local RFC/POC: preserve the hint so merge instrumentation can
-+		 * later correlate larger request shapes with decode tail latency.
-+		 */
++		rq->kairo_hints.flags |= KAIRO_HINT_MERGE_ATTEMPTED;
 +	}

@@ -10,14 +10,14 @@ local research prototype, not an upstream submission plan.
 | Patch | Area | Primary subsystem | Kairo concept |
 | --- | --- | --- | --- |
 | `0001` | decode priority | `block/mq-deadline.c` | decode-read fast path |
-| `0002` | request classification | `blk-mq` headers/core | internal Kairo I/O classes |
+| `0002` | request classification | `blk-mq` headers/core | internal Kairo I/O classes and merge-instrumentation flags |
 | `0003` | io_uring hint plumbing | `io_uring`, `fs` | experimental intent propagation |
-| `0004` | large-block coalescing | `blk-merge` | larger merged KV reads |
+| `0004` | large-block coalescing | `blk-merge`, `blk-mq` | merge-bias helpers, per-request merge flags, request-size observability |
 | `0005` | prefetch deadlines | `mq-deadline` | separate prefetch urgency |
 | `0006` | ephemeral semantics | `fs`, `mm`, `block` | recomputable KV-cache behavior |
 | `0007` | placement/lifetime | `blk-mq`, `nvme` | model/session/lifetime metadata |
 | `0008` | NVMe mapping | `drivers/nvme/host` | generic Streams/FDP/ZNS mapping hooks |
-| `0009` | observability | `mq-deadline`, `debugfs` | counters proving Kairo code paths |
+| `0009` | observability | `mq-deadline`, `debugfs` | counters proving Kairo code paths: dispatch, merge instrumentation, request-size histogram |
 
 ## Design Themes
 
@@ -26,6 +26,7 @@ local research prototype, not an upstream submission plan.
 - prefill writes should remain throughput-oriented and yield to urgent reads
 - eviction/discard should be lowest priority
 - large-block KV-cache access should avoid unnecessary fragmentation
+- merge instrumentation should reveal whether decode/prefetch reads are coalescing successfully
 - model/session/lifetime hints should map to software grouping first and hardware features opportunistically
 - all feature-specific backends should degrade to safe no-op behavior on unsupported hardware
 
@@ -35,14 +36,17 @@ local research prototype, not an upstream submission plan.
 - `0003` sketches an experimental `RWF_KAIRO_*` flow for future `io_uring` use
 - later patches intentionally add local-only request metadata to show where Kairo semantics would live
 - NVMe backend mapping remains feature-detected and optional
+- merge instrumentation uses per-request flags (`KAIRO_HINT_MERGE_ATTEMPTED`, `KAIRO_HINT_MERGE_SUCCESS`)
+  set during `attempt_merge` and consumed by the scheduler at dispatch time
 
 ## Validation Focus
 
 Immediate validation remains centered on:
 
 - `0001` applicability and build status on Linux 6.8.x
+- `0004` merge-bias interaction with existing blk-merge safety checks
 - visible sysfs counters when `mq-deadline` is active
-- `decode_p99_us`, `decode_p95_us`, and `decode_avg_us` under mixed pressure
+- `decode_p99_us`, `decode_p95_us`, and `decode_avg_us` under merge-friendly vs merge-hostile patterns
 - proving counter movement via `scripts/validate_kairo_runtime.sh`
 
 ## What Remains Open
@@ -50,4 +54,5 @@ Immediate validation remains centered on:
 - exact request lifetime for extra metadata inside `struct request`
 - whether merge bias belongs in generic `blk-merge` or only in Kairo-classified paths
 - whether `RWF_KAIRO_*` should stay RFC-only or move to a different local hint path
+- whether the request-size histogram is better served by debugfs snapshots
 - how much value generic NVMe Streams/FDP/ZNS mapping provides without workload-specific placement control

@@ -1,0 +1,7 @@
+#ifndef KAIRO_HINTS_H
+#define KAIRO_HINTS_H
+
+#define KAIRO_CLASS_DECODE_READ    0
+#define KAIRO_CLASS_PREFETCH_READ  1
+
+#endif /* KAIRO_HINTS_H */

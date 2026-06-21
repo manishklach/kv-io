@@ -19,6 +19,7 @@ Temporary implementation:
 - derive Kairo class from existing request op and `ioprio`
 - attach a local `kairo_request_hints` field to `struct request`
 - initialize the hints during `blk_mq_rq_ctx_init()` for Linux 6.8.x
+- include merge-instrumentation flags consumed by blk-merge and the scheduler
 
 Still to validate:
 - whether the selected request init hook remains the best insertion point across
@@ -45,11 +46,19 @@ index 31c4b1b..631af67 100644
 +	u32 flags;
 +};
 +
++/*
++ * Per-request Kairo merge-instrumentation flags.
++ * Set in the blk-merge path (attempt_merge), consumed by the scheduler at
++ * dispatch time to accumulate aggregate merge counters.
++ */
++#define KAIRO_HINT_MERGE_ATTEMPTED	BIT(0)
++#define KAIRO_HINT_MERGE_SUCCESS	BIT(1)
++
  diff --git a/include/linux/blk-mq.h b/include/linux/blk-mq.h
- index 8dca8f1..7d6c9f2 100644
- --- a/include/linux/blk-mq.h
- +++ b/include/linux/blk-mq.h
- @@
+index 8dca8f1..7d6c9f2 100644
+--- a/include/linux/blk-mq.h
++++ b/include/linux/blk-mq.h
+@@
 +static inline enum kairo_io_class kairo_classify_rq(struct request *rq)
 +{
 +	unsigned short ioprio = req_get_ioprio(rq);
@@ -103,14 +112,55 @@ index 31c4b1b..631af67 100644
 +{
 +	return rq->kairo_hints.io_class == KAIRO_IO_EVICT;
 +}
++
++static inline bool kairo_is_merge_candidate(struct request *rq, struct bio *bio)
++{
++	if (!rq->kairo_hints.io_class)
++		return false;
++	if (bio_data_dir(bio) != rq_data_dir(rq))
++		return false;
++	if (req_op(rq) != bio_op(bio))
++		return false;
++	return true;
++}
++
++static inline bool kairo_should_bias_merge(struct request *rq, struct bio *bio)
++{
++	enum kairo_io_class rq_class = rq->kairo_hints.io_class;
++
++	if (rq_class != KAIRO_IO_DECODE_READ &&
++	    rq_class != KAIRO_IO_PREFETCH_READ)
++		return false;
++
++	return kairo_is_merge_candidate(rq, bio);
++}
++
++static inline bool kairo_merge_within_limits(struct request_queue *q,
++					      struct request *rq,
++					      struct bio *bio)
++{
++	unsigned int sectors = blk_rq_sectors(rq) + bio_sectors(bio);
++
++	if (sectors > queue_max_hw_sectors(q))
++		return false;
++	if (sectors > queue_max_segment_size(q) >> 9)
++		return false;
++	return true;
++}
++
++static inline bool kairo_has_deadline(struct request *rq)
++{
++	return rq->kairo_hints.io_class == KAIRO_IO_DECODE_READ ||
++	       rq->kairo_hints.io_class == KAIRO_IO_PREFETCH_READ;
++}
 @@
 +	struct kairo_request_hints	kairo_hints;
 +
  diff --git a/block/blk-mq.c b/block/blk-mq.c
- index c4aab7c..c04b617 100644
- --- a/block/blk-mq.c
- +++ b/block/blk-mq.c
- @@
+index c4aab7c..c04b617 100644
+--- a/block/blk-mq.c
++++ b/block/blk-mq.c
+@@
 +static void blk_mq_kairo_init_request(struct request *rq)
 +{
 +	/*
@@ -121,7 +171,7 @@ index 31c4b1b..631af67 100644
 +	kairo_init_request_hints(rq);
 +}
 @@
-  void blk_mq_rq_ctx_init(struct blk_mq_alloc_data *data, struct request *rq)
-  {
+ void blk_mq_rq_ctx_init(struct blk_mq_alloc_data *data, struct request *rq)
+ {
 +	blk_mq_kairo_init_request(rq);
-  }
+ }

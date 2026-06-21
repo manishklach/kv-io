@@ -30,14 +30,22 @@
 
 ## Stage 3
 
-- Patches involved: `0004`
+- Patches involved: `0004`, `0009`, `0002`
 - What should compile:
-  - merge-bias helper hooks and instrumentation points
+  - Kairo merge-bias helpers (`kairo_should_bias_merge`, `kairo_merge_within_limits`)
+  - per-request merge-instrumentation flags set in `attempt_merge` and `blk_mq_bio_merge`
+  - request-size histogram counters consumed at dispatch time
 - What should be measurable:
-  - request-shape changes
-  - merge-attempt and merge-success counters once wired
+  - `kairo_merge_attempts` / `kairo_merge_successes` / `kairo_merge_rejects`
+  - `kairo_decode_merge_attempts` / `kairo_decode_merge_successes`
+  - `kairo_prefetch_merge_attempts` / `kairo_prefetch_merge_successes`
+  - `kairo_small_decode_reads` / `kairo_large_decode_reads` (threshold via `kairo_large_read_kb`)
+  - full request-size histogram: `kairo_{decode,prefetch}_read_{4k,16k,64k,256k,1m,4m,gt4m}`
+  - benchmark access patterns: random, sequential, strided, clustered
+  - benchmark modes: merge-friendly (sequential, large block), merge-hostile (fragmented, random/session-interleaved)
 - What is still RFC-only:
   - full validation of merge policy on real devices
+  - whether the histogram counters are better served by debugfs snapshots instead of sysfs
 
 ## Stage 4
 
