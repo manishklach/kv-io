@@ -1,5 +1,10 @@
 # Kairo
 
+[![License](https://img.shields.io/badge/license-GPL--2.0-blue)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/manishklach/kairo-io?display_name=tag&label=release)](https://github.com/manishklach/kairo-io/releases)
+[![Last Commit](https://img.shields.io/github/last-commit/manishklach/kairo-io)](https://github.com/manishklach/kairo-io/commits/main)
+[![Status](https://img.shields.io/badge/status-experimental-orange)](.)
+
 Kernel AI Runtime I/O for KV-cache-aware Linux storage
 
 Kairo is an internal Linux-kernel RFC/POC exploring AI KV-cache-aware block I/O for generic NVMe SSDs.
