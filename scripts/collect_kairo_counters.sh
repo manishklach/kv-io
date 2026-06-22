@@ -80,6 +80,6 @@ counter_names=(
 
 for name in "${counter_names[@]}"; do
   if [[ -r "$IOSCHED_DIR/$name" ]]; then
-    cat "$IOSCHED_DIR/$name" | tee "$OUT_DIR/$name.txt"
+    tee "$OUT_DIR/$name.txt" < "$IOSCHED_DIR/$name"
   fi
 done

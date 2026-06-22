@@ -4,7 +4,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 BENCH_PATH="$REPO_ROOT/kairo_bench"
-BENCH_SOURCE="$REPO_ROOT/bench/kairo_bench.c"
 COLLECT="$SCRIPT_DIR/collect_kairo_counters.sh"
 PARSE="$SCRIPT_DIR/parse_kairo_bench_summary.py"
 RESULTS_DIR="$REPO_ROOT/results/stage4/$(date +%Y%m%d-%H%M%S)"

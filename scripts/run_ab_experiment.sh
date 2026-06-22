@@ -95,7 +95,7 @@ mkdir -p "$OUT_DIR"
 
 echo "[kairo] selecting mq-deadline on $BLOCK_DEVICE"
 printf '%s\n' mq-deadline >"$SCHEDULER_FILE"
-cat "$SCHEDULER_FILE" | tee "$OUT_DIR/scheduler.txt"
+tee "$OUT_DIR/scheduler.txt" < "$SCHEDULER_FILE"
 
 if ! grep -q '\[mq-deadline\]' "$SCHEDULER_FILE"; then
   echo "[kairo] mq-deadline is not active on $BLOCK_DEVICE" >&2

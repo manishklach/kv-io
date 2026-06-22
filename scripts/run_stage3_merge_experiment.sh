@@ -67,12 +67,13 @@ run_case() {
     echo "    $BENCH_DIR/kairo_bench --file $FILE --mode mixed \\"
     echo "      --access-pattern $access_pattern --runtime 30 \\"
     [ -n "$fragment_size" ] && echo "      --fragment-size $fragment_size \\"
-    echo "      ${@:+$@}"
-    # write a placeholder log
-    echo "kairo_bench summary" > "$case_dir/bench.log"
-    echo "mode=mixed" >> "$case_dir/bench.log"
-    echo "access_pattern=$access_pattern" >> "$case_dir/bench.log"
-    echo "fragment_size_bytes=${fragment_size:-0}" >> "$case_dir/bench.log"
+    echo "      $*"
+    {
+        echo "kairo_bench summary"
+        echo "mode=mixed"
+        echo "access_pattern=$access_pattern"
+        echo "fragment_size_bytes=${fragment_size:-0}"
+    } > "$case_dir/bench.log"
   else
     local bench_args=(
       --file "$FILE"

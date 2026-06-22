@@ -50,14 +50,14 @@ jobs:
             git init "$LINUX_CACHE_DIR"
             git -C "$LINUX_CACHE_DIR" remote add origin "$LINUX_REMOTE"
             git -C "$LINUX_CACHE_DIR" config core.sparseCheckout true
-            cat > "$LINUX_CACHE_DIR/.git/info/sparse-checkout" <<'EOF'
-            block/
-            drivers/nvme/host/
-            fs/
-            include/
-            io_uring/
-            mm/
-            EOF
+            printf '%s\n' \
+              block/ \
+              drivers/nvme/host/ \
+              fs/ \
+              include/ \
+              io_uring/ \
+              mm/ \
+              > "$LINUX_CACHE_DIR/.git/info/sparse-checkout"
           fi
           git -C "$LINUX_CACHE_DIR" fetch --depth 1 origin "$LINUX_REF"
           git -C "$LINUX_CACHE_DIR" checkout --force FETCH_HEAD
