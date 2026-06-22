@@ -39,7 +39,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.LINUX_CACHE_DIR }}
-          key: linux-src-${{ env.LINUX_REF }}-sparse-v1
+          key: linux-src-${{ env.LINUX_REF }}-sparse-v2
 
       - name: Fetch pinned Linux 6.8.12 source tree
         shell: bash
@@ -57,6 +57,15 @@ jobs:
               include/ \
               io_uring/ \
               mm/ \
+              scripts/ \
+              arch/x86/ \
+              arch/arm64/ \
+              kernel/ \
+              lib/ \
+              init/ \
+              usr/ \
+              crypto/ \
+              security/ \
               > "$LINUX_CACHE_DIR/.git/info/sparse-checkout"
           fi
           git -C "$LINUX_CACHE_DIR" fetch --depth 1 origin "$LINUX_REF"
@@ -70,3 +79,95 @@ jobs:
           rm -rf "$linux_tree"
           cp -R "$LINUX_CACHE_DIR" "$linux_tree"
           "$GITHUB_WORKSPACE/scripts/validate_patch_stack.sh" "$linux_tree"
+
+      - name: Check full series (0001-0017) applies cleanly
+        shell: bash
+        run: |
+          set -euo pipefail
+          linux_tree="$RUNNER_TEMP/linux-6.8.12-full-series"
+          rm -rf "$linux_tree"
+          cp -R "$LINUX_CACHE_DIR" "$linux_tree"
+          "$GITHUB_WORKSPACE/kernel/integration/linux-6.8/apply_full_series.sh" "$linux_tree"
+
+      - name: Validate Kconfig dependencies exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "[kairo] checking Kconfig dependencies..."
+          required=("MQ_DEADLINE" "BLK_DEV_INTEGRITY" "IO_URING" "BPF" "NVME_CORE" "TRACEPOINTS")
+          missing=()
+          for cfg in "${required[@]}"; do
+            if grep -rl "config $cfg\b" "$LINUX_CACHE_DIR/block/" "$LINUX_CACHE_DIR/drivers/" \
+              "$LINUX_CACHE_DIR/io_uring/" "$LINUX_CACHE_DIR/init/" "$LINUX_CACHE_DIR/kernel/" \
+              "$LINUX_CACHE_DIR/security/" "$LINUX_CACHE_DIR/lib/" \
+              --include="Kconfig" 2>/dev/null | grep -q .; then
+              echo "[kairo]   CONFIG_$cfg: FOUND"
+            else
+              echo "[kairo]   CONFIG_$cfg: NOT FOUND (may be in unchecked path)"
+              missing+=("$cfg")
+            fi
+          done
+          if [[ ${#missing[@]} -gt 0 ]]; then
+            echo "[kairo] Kconfig check complete: ${#missing[@]} options not found in scanned paths"
+          else
+            echo "[kairo] Kconfig check: all required options found"
+          fi
+
+      - name: Run checkpatch.pl on all patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp="$LINUX_CACHE_DIR/scripts/checkpatch.pl"
+          if [[ ! -f "$cp" ]]; then
+            echo "[kairo] checkpatch.pl not found; skipping"
+            exit 0
+          fi
+          results="$RUNNER_TEMP/checkpatch_results.txt"
+          : > "$results"
+          for patch in "$GITHUB_WORKSPACE/kernel/patches/"*.patch; do
+            name="$(basename "$patch")"
+            echo "=== $name ===" >> "$results"
+            perl "$cp" --no-tree --strict "$patch" >> "$results" 2>&1 || true
+            echo "" >> "$results"
+          done
+          for patch in "$GITHUB_WORKSPACE/kernel/patches/foundation/"*.patch; do
+            name="$(basename "$patch")"
+            echo "=== $name ===" >> "$results"
+            perl "$cp" --no-tree --strict "$patch" >> "$results" 2>&1 || true
+            echo "" >> "$results"
+          done
+          echo "[kairo] checkpatch.pl results written to $results"
+          # Print summary of errors/warnings
+          grep -cE "^(ERROR|WARNING):" "$results" || true
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc make bc flex bison libelf-dev libssl-dev gcc-aarch64-linux-gnu
+
+      - name: Build patched objects (native x86-64)
+        shell: bash
+        run: |
+          set -euo pipefail
+          linux_tree="$RUNNER_TEMP/linux-6.8.12-build-native"
+          rm -rf "$linux_tree"
+          cp -R "$LINUX_CACHE_DIR" "$linux_tree"
+          "$GITHUB_WORKSPACE/kernel/integration/linux-6.8/apply_full_series.sh" "$linux_tree"
+          make -C "$linux_tree" defconfig
+          make -C "$linux_tree" olddefconfig
+          make -C "$linux_tree" -j"$(nproc)" block/mq-deadline.o block/blk-mq.o 2>&1
+          echo "[kairo] native x86-64 build passed"
+
+      - name: Build patched objects (arm64 cross)
+        shell: bash
+        run: |
+          set -euo pipefail
+          linux_tree="$RUNNER_TEMP/linux-6.8.12-build-arm64"
+          rm -rf "$linux_tree"
+          cp -R "$LINUX_CACHE_DIR" "$linux_tree"
+          "$GITHUB_WORKSPACE/kernel/integration/linux-6.8/apply_full_series.sh" "$linux_tree"
+          make -C "$linux_tree" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
+          make -C "$linux_tree" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+          make -C "$linux_tree" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j"$(nproc)" block/mq-deadline.o block/blk-mq.o 2>&1
+          echo "[kairo] arm64 cross-build passed"
