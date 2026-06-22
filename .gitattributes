@@ -1,3 +1,0 @@
-# GitHub language stats: treat shell scripts as C since they are experiment
-# harness infrastructure for the C benchmark code.
-*.sh linguist-language=C

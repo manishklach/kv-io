@@ -290,6 +290,61 @@ static enum kairo_backend_mode parse_backend_mode(const char *value)
     exit(EXIT_FAILURE);
 }
 
+static const char *kairo_backend_class_name(const struct kairo_config *cfg)
+{
+    if (cfg->backend_mode == KAIRO_BACKEND_MODE_NONE)
+        return "KAIRO_BACKEND_NONE";
+
+    switch (cfg->lifetime_class) {
+    case KAIRO_USER_LIFE_SHORT:
+        return "KAIRO_BACKEND_SHORT_LIVED";
+    case KAIRO_USER_LIFE_SESSION:
+        return "KAIRO_BACKEND_SESSION_LOCAL";
+    case KAIRO_USER_LIFE_MODEL:
+        return "KAIRO_BACKEND_MODEL_LOCAL";
+    case KAIRO_USER_LIFE_PERSISTENT:
+        return "KAIRO_BACKEND_PERSISTENT";
+    default:
+        if (cfg->recompute_ok)
+            return "KAIRO_BACKEND_RECOMPUTABLE";
+        return "KAIRO_BACKEND_NONE";
+    }
+}
+
+static unsigned int kairo_backend_stream_id(const struct kairo_config *cfg)
+{
+    if (cfg->backend_mode != KAIRO_BACKEND_MODE_STREAMS)
+        return 0;
+    if (cfg->fixed_placement_group > 0)
+        return cfg->fixed_placement_group;
+    if (cfg->fixed_cache_pool_id > 0)
+        return cfg->fixed_cache_pool_id;
+    return 0;
+}
+
+static unsigned int kairo_backend_fdp_placement_id(const struct kairo_config *cfg)
+{
+    if (cfg->backend_mode != KAIRO_BACKEND_MODE_FDP)
+        return 0;
+    if (cfg->fixed_cache_pool_id > 0)
+        return cfg->fixed_cache_pool_id;
+    if (cfg->fixed_placement_group > 0)
+        return cfg->fixed_placement_group;
+    return 0;
+}
+
+static unsigned int kairo_backend_zone_hint(const struct kairo_config *cfg)
+{
+    if (cfg->backend_mode != KAIRO_BACKEND_MODE_ZNS)
+        return 0;
+    return (unsigned int)cfg->lifetime_class;
+}
+
+static bool kairo_backend_noop_fallback(const struct kairo_config *cfg)
+{
+    return cfg->backend_mode == KAIRO_BACKEND_MODE_NONE;
+}
+
 static uint32_t parse_lifetime(const char *value)
 {
     if (strcmp(value, "short") == 0)
@@ -1196,61 +1251,12 @@ static void print_summary(const struct kairo_config *cfg, const struct kairo_sta
     printf("fixed_cache_pool_id=%u\n", cfg->fixed_cache_pool_id);
     printf("fixed_placement_group=%u\n", cfg->fixed_placement_group);
     printf("backend_mode=%s\n", kairo_backend_mode_name(cfg->backend_mode));
-
-    /* Compute backend mapping metadata for --backend-mode */
-    {
-        unsigned int stream_id = 0;
-        unsigned int fdp_placement_id = 0;
-        unsigned int zone_hint = 0;
-        bool noop_fallback = (cfg->backend_mode == KAIRO_BACKEND_MODE_NONE);
-        const char *backend_class = "KAIRO_BACKEND_NONE";
-
-        if (cfg->backend_mode != KAIRO_BACKEND_MODE_NONE) {
-            switch (cfg->lifetime_class) {
-            case KAIRO_USER_LIFE_SHORT:
-                backend_class = "KAIRO_BACKEND_SHORT_LIVED";
-                break;
-            case KAIRO_USER_LIFE_SESSION:
-                backend_class = "KAIRO_BACKEND_SESSION_LOCAL";
-                break;
-            case KAIRO_USER_LIFE_MODEL:
-                backend_class = "KAIRO_BACKEND_MODEL_LOCAL";
-                break;
-            case KAIRO_USER_LIFE_PERSISTENT:
-                backend_class = "KAIRO_BACKEND_PERSISTENT";
-                break;
-            default:
-                if (cfg->recompute_ok)
-                    backend_class = "KAIRO_BACKEND_RECOMPUTABLE";
-                break;
-            }
-            if (cfg->recompute_ok && cfg->lifetime_class == KAIRO_USER_LIFE_NONE)
-                backend_class = "KAIRO_BACKEND_RECOMPUTABLE";
-        }
-
-        switch (cfg->backend_mode) {
-        case KAIRO_BACKEND_MODE_STREAMS:
-            stream_id = cfg->placement_groups ? cfg->placement_groups : cfg->cache_pools;
-            noop_fallback = false;
-            break;
-        case KAIRO_BACKEND_MODE_FDP:
-            fdp_placement_id = cfg->cache_pools ? cfg->cache_pools : cfg->placement_groups;
-            noop_fallback = false;
-            break;
-        case KAIRO_BACKEND_MODE_ZNS:
-            zone_hint = (unsigned int)cfg->lifetime_class;
-            noop_fallback = false;
-            break;
-        default:
-            break;
-        }
-
-        printf("backend_class=%s\n", backend_class);
-        printf("stream_id=%u\n", stream_id);
-        printf("fdp_placement_id=%u\n", fdp_placement_id);
-        printf("zone_hint=%u\n", zone_hint);
-        printf("backend_noop_fallback=%s\n", noop_fallback ? "true" : "false");
-    }
+    printf("backend_class=%s\n", kairo_backend_class_name(cfg));
+    printf("stream_id=%u\n", kairo_backend_stream_id(cfg));
+    printf("fdp_placement_id=%u\n", kairo_backend_fdp_placement_id(cfg));
+    printf("zone_hint=%u\n", kairo_backend_zone_hint(cfg));
+    printf("backend_noop_fallback=%s\n",
+           kairo_backend_noop_fallback(cfg) ? "true" : "false");
 
     printf("decode_total_reads=%" PRIu64 "\n", snapshot.total_decode_reads);
     printf("prefetch_total_reads=%" PRIu64 "\n", snapshot.total_prefetch_reads);

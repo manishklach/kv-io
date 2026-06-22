@@ -64,11 +64,45 @@ static void test_merge_hostile_defaults(void)
     assert(cfg.prefill_region_pct == 25);
 }
 
+static void test_backend_summary_helpers(void)
+{
+    struct kairo_config cfg;
+
+    set_defaults(&cfg);
+    assert(strcmp(kairo_backend_class_name(&cfg), "KAIRO_BACKEND_NONE") == 0);
+    assert(kairo_backend_stream_id(&cfg) == 0);
+    assert(kairo_backend_fdp_placement_id(&cfg) == 0);
+    assert(kairo_backend_zone_hint(&cfg) == 0);
+    assert(kairo_backend_noop_fallback(&cfg) == true);
+
+    cfg.backend_mode = KAIRO_BACKEND_MODE_STREAMS;
+    cfg.lifetime_class = KAIRO_USER_LIFE_MODEL;
+    cfg.fixed_placement_group = 7;
+    assert(strcmp(kairo_backend_class_name(&cfg), "KAIRO_BACKEND_MODEL_LOCAL") == 0);
+    assert(kairo_backend_stream_id(&cfg) == 7);
+    assert(kairo_backend_noop_fallback(&cfg) == false);
+
+    cfg.backend_mode = KAIRO_BACKEND_MODE_FDP;
+    cfg.fixed_placement_group = 0;
+    cfg.fixed_cache_pool_id = 11;
+    assert(kairo_backend_fdp_placement_id(&cfg) == 11);
+
+    cfg.backend_mode = KAIRO_BACKEND_MODE_ZNS;
+    cfg.lifetime_class = KAIRO_USER_LIFE_SESSION;
+    assert(kairo_backend_zone_hint(&cfg) == KAIRO_USER_LIFE_SESSION);
+
+    cfg.backend_mode = KAIRO_BACKEND_MODE_NONE;
+    cfg.recompute_ok = true;
+    cfg.lifetime_class = KAIRO_USER_LIFE_NONE;
+    assert(strcmp(kairo_backend_class_name(&cfg), "KAIRO_BACKEND_NONE") == 0);
+}
+
 int main(void)
 {
     test_ioprio_mapping();
     test_merge_friendly_defaults();
     test_merge_hostile_defaults();
+    test_backend_summary_helpers();
     puts("test_kairo_bench: ok");
     return 0;
 }

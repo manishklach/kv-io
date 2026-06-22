@@ -122,6 +122,7 @@ run_case() {
   local case_name="$1"
   shift
   local case_dir="$RESULTS_DIR/$case_name"
+  local bench_exit=0
 
   if $DRY_RUN; then
     echo "[dry-run] case: $case_name"
@@ -140,8 +141,11 @@ run_case() {
       echo "[kairo] WARNING: before-counter collection failed for $case_name" >&2
   fi
 
+  set +e
   "${cmd[@]}" > "$case_dir/bench.log" 2>&1
-  echo "bench_exit_code=$?" >> "$case_dir/bench.log"
+  bench_exit=$?
+  set -e
+  echo "bench_exit_code=$bench_exit" >> "$case_dir/bench.log"
 
   if ! $SKIP_COUNTERS && [[ -n "$BLOCK_DEVICE" ]]; then
     "$COLLECT" "$BLOCK_DEVICE" "$case_dir/counters-after" 2>/dev/null || \
@@ -149,6 +153,11 @@ run_case() {
   fi
 
   generate_summary "$case_name" "$case_dir"
+
+  if (( bench_exit != 0 )); then
+    echo "[kairo] ERROR: benchmark failed for $case_name (exit $bench_exit)" >&2
+    return "$bench_exit"
+  fi
 }
 
 read_counter() {
@@ -192,6 +201,7 @@ generate_summary() {
     echo "fdp_placement_id=$(extract fdp_placement_id)"
     echo "zone_hint=$(extract zone_hint)"
     echo "backend_noop_fallback=$(extract backend_noop_fallback)"
+    echo "bench_exit_code=$(extract bench_exit_code)"
     echo "models=$(extract models)"
     echo "sessions=$(extract sessions)"
     echo "cache_pools=$(extract cache_pools)"
@@ -239,7 +249,7 @@ all_counter_delta_names=(
   kairo_backend_persistent_delta
 )
 
-csv_header="case,backend_mode,backend_class,stream_id,fdp_placement_id,zone_hint,backend_noop_fallback,models,sessions,cache_pools,placement_groups,lifetime,recompute_ok,semantic_mode,hint_mode,decode_p99_us,decode_p95_us,decode_avg_us,write_MBps,decode_read_MBps,prefetch_read_MBps,total_evictions"
+csv_header="case,backend_mode,backend_class,stream_id,fdp_placement_id,zone_hint,backend_noop_fallback,bench_exit_code,models,sessions,cache_pools,placement_groups,lifetime,recompute_ok,semantic_mode,hint_mode,decode_p99_us,decode_p95_us,decode_avg_us,write_MBps,decode_read_MBps,prefetch_read_MBps,total_evictions"
 for dname in "${all_counter_delta_names[@]}"; do
   csv_header="$csv_header,$dname"
 done

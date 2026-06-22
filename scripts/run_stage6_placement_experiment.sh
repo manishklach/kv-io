@@ -134,6 +134,7 @@ run_case() {
   local case_name="$1"
   shift
   local case_dir="$RESULTS_DIR/$case_name"
+  local bench_exit=0
 
   if $DRY_RUN; then
     echo "[dry-run] case: $case_name"
@@ -157,8 +158,10 @@ run_case() {
   fi
 
   # Run benchmark
+  set +e
   "${cmd[@]}" > "$case_dir/bench.log" 2>&1
-  local bench_exit=$?
+  bench_exit=$?
+  set -e
   echo "bench_exit_code=$bench_exit" >> "$case_dir/bench.log"
 
   # Collect counters after
@@ -169,6 +172,11 @@ run_case() {
 
   # Generate summary.log
   generate_summary "$case_name" "$case_dir"
+
+  if (( bench_exit != 0 )); then
+    echo "[kairo] ERROR: benchmark failed for $case_name (exit $bench_exit)" >&2
+    return "$bench_exit"
+  fi
 }
 
 # ---- counter delta helpers ----
@@ -244,6 +252,7 @@ generate_summary() {
     echo "recompute_ok=$(extract recompute_ok)"
     echo "semantic_mode=$(extract semantic_mode)"
     echo "hint_mode=$(extract hint_mode)"
+    echo "bench_exit_code=$(extract bench_exit_code)"
 
     echo "decode_p99_us=$(extract decode_p99_us)"
     echo "decode_p95_us=$(extract decode_p95_us)"
@@ -288,7 +297,7 @@ all_counter_delta_names=(
 )
 
 # ---- CSV header fields (matching parse_stage6_placement_summary.py ordering) ----
-csv_header="case,models,sessions,cache_pools,placement_groups,lifetime,recompute_ok,semantic_mode,hint_mode,decode_p99_us,decode_p95_us,decode_avg_us,write_MBps,decode_read_MBps,prefetch_read_MBps,total_evictions"
+csv_header="case,models,sessions,cache_pools,placement_groups,lifetime,recompute_ok,semantic_mode,hint_mode,bench_exit_code,decode_p99_us,decode_p95_us,decode_avg_us,write_MBps,decode_read_MBps,prefetch_read_MBps,total_evictions"
 for dname in "${all_counter_delta_names[@]}"; do
   csv_header="$csv_header,$dname"
 done
