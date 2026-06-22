@@ -72,6 +72,10 @@ jobs:
             > "$LINUX_CACHE_DIR/.git/info/sparse-checkout"
           git -C "$LINUX_CACHE_DIR" fetch --depth 1 origin "$LINUX_REF"
           git -C "$LINUX_CACHE_DIR" checkout --force FETCH_HEAD
+          # Force re-evaluation of sparse-checkout patterns so newly added
+          # patterns (e.g. /Makefile) take effect on cached trees.
+          git -C "$LINUX_CACHE_DIR" read-tree -mu HEAD 2>/dev/null || \
+            git -C "$LINUX_CACHE_DIR" checkout FETCH_HEAD -- .
 
       - name: Check foundation patch stack on Linux 6.8.12
         shell: bash
