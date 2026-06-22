@@ -118,6 +118,7 @@ dry_cmd() {
   if $DRY_RUN; then
     echo "  $*"
   else
+    # shellcheck disable=SC2294
     eval "$@"
   fi
 }
