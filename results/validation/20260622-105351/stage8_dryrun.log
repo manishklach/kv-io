@@ -1,0 +1,24 @@
+[stage8] DRY RUN: commands will be printed but not executed
+[stage8] Kairo tracepoints not detected (expected on unpatched kernels)
+[stage8] Trace mode: none
+[stage8] Would create results under /mnt/c/Users/ManishKL/Documents/Playground/kv-io/results/stage8/20260622T105353
+stage=8
+timestamp=20260622T105353
+file_path=/tmp/kairo_validation.bin
+block_dev=loop0
+duration=3
+hint_mode=ioprio
+trace_mode=none
+tracepoints_available=false
+bench=/mnt/c/Users/ManishKL/Documents/Playground/kv-io/kairo_bench
+results_dir=/mnt/c/Users/ManishKL/Documents/Playground/kv-io/results/stage8/20260622T105353
+skip_counters=true
+dry_run=true
+[stage8] Collecting pre-benchmark counters...
+[stage8] Skipping counter collection
+[stage8] Running benchmark: /mnt/c/Users/ManishKL/Documents/Playground/kv-io/kairo_bench --file /tmp/kairo_validation.bin --duration 3 --hint-mode ioprio --backend-mode generic
+  /mnt/c/Users/ManishKL/Documents/Playground/kv-io/kairo_bench --file /tmp/kairo_validation.bin --duration 3 --hint-mode ioprio --backend-mode generic
+[stage8] Collecting post-benchmark counters...
+[stage8] Skipping counter collection
+[stage8] Dry run complete; summary files were not written.
+[stage8] Tracepoints were not available. Run on a patched kernel for trace data.

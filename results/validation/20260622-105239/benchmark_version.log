@@ -1,0 +1,38 @@
+/mnt/c/Users/ManishKL/Documents/Playground/kv-io/kairo_bench: unrecognized option '--help'
+Usage: /mnt/c/Users/ManishKL/Documents/Playground/kv-io/kairo_bench --file <path> [options]
+  --file <path>             Target file path
+  --mode <name>             decode-only|mixed|prefetch-pressure|
+                            eviction-pressure|multisession|
+                            merge-friendly|merge-hostile
+  --size <bytes|K|M|G>      File size, default 8G
+  --block-size <bytes|K|M|G>
+                            I/O block size, default 1M
+  --decode-threads <n>      Default 4
+  --prefetch-threads <n>    Default 1
+  --write-threads <n>       Default 2
+  --evict-threads <n>       Default 0
+  --sessions <n>            Default 1
+  --models <n>              Default 1
+  --cache-pools <n>         Number of cache pools (default: 1)
+  --placement-groups <n>    Number of placement groups (default: 1)
+  --model-id <n>            Fixed model ID (default: distribute)
+  --session-id <n>          Fixed session ID (default: distribute)
+  --cache-pool-id <n>       Fixed cache pool ID (default: 0)
+  --placement-group <n>     Fixed placement group (default: 0)
+  --lifetime <name>         short|session|model|persistent
+  --recompute-ok            Mark writes as recomputable
+  --prefill-region-pct <n>  Default 34
+  --decode-region-pct <n>   Default 33
+  --runtime <sec>           Default 60
+  --queue-depth <n>         Placeholder for future io_uring path
+  --access-pattern <name>   random|sequential|strided|clustered
+  --stride-blocks <n>       Blocks between strided accesses
+  --cluster-size-blocks <n> Blocks per cluster (clustered mode)
+  --fragment-size <B|K|M>   Fragment I/O into smaller chunks
+  --hint-mode <name>        ioprio|rwf|both (default: ioprio)
+  --semantic-mode <name>    normal|ephemeral|recomputable|
+                            ephemeral-recomputable
+  --backend-mode <name>     none|generic|streams|fdp|zns
+  --random-read             Default mode
+  --sequential-read         Disable random read placement
+  --buffered                Disable O_DIRECT

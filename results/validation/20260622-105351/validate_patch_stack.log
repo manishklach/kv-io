@@ -1,0 +1,4 @@
+[kairo] running Stage 7.5 Python validator...
+[OK] All Stage 7.5 validation checks passed.
+[kairo] patch metadata checks passed
+[kairo] tip: pass a Linux 6.8.x source tree to run foundation apply checks

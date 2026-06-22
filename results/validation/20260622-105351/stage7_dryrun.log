@@ -1,0 +1,28 @@
+========================================
+ Stage 7: Generic Backend Mapping
+========================================
+Benchmark:   /mnt/c/Users/ManishKL/Documents/Playground/kv-io/kairo_bench
+File:        /tmp/kairo_validation.bin
+Block dev:   loop0
+Duration:    3s
+Hint mode:   both
+Results:     /mnt/c/Users/ManishKL/Documents/Playground/kv-io/results/stage7/20260622-105353
+*** DRY RUN ***
+
+[dry-run] case: 01-generic-short-lived
+[dry-run]   dir: /mnt/c/Users/ManishKL/Documents/Playground/kv-io/results/stage7/20260622-105353/01-generic-short-lived
+[dry-run]   cmd: /mnt/c/Users/ManishKL/Documents/Playground/kv-io/kairo_bench --file "/tmp/kairo_validation.bin" --runtime "3" --hint-mode "both" --backend-mode generic --mode mixed --models 2 --sessions 4 --cache-pools 2 --placement-groups 2 --lifetime short
+[dry-run] case: 02-generic-session-local
+[dry-run]   dir: /mnt/c/Users/ManishKL/Documents/Playground/kv-io/results/stage7/20260622-105353/02-generic-session-local
+[dry-run]   cmd: /mnt/c/Users/ManishKL/Documents/Playground/kv-io/kairo_bench --file "/tmp/kairo_validation.bin" --runtime "3" --hint-mode "both" --backend-mode generic --mode multisession --models 1 --sessions 8 --cache-pools 2 --placement-groups 4 --lifetime session
+[dry-run] case: 03-streams-model-local
+[dry-run]   dir: /mnt/c/Users/ManishKL/Documents/Playground/kv-io/results/stage7/20260622-105353/03-streams-model-local
+[dry-run]   cmd: /mnt/c/Users/ManishKL/Documents/Playground/kv-io/kairo_bench --file "/tmp/kairo_validation.bin" --runtime "3" --hint-mode "both" --backend-mode streams --mode mixed --models 4 --sessions 8 --cache-pools 4 --placement-groups 8 --lifetime model
+[dry-run] case: 04-fdp-cache-pool
+[dry-run]   dir: /mnt/c/Users/ManishKL/Documents/Playground/kv-io/results/stage7/20260622-105353/04-fdp-cache-pool
+[dry-run]   cmd: /mnt/c/Users/ManishKL/Documents/Playground/kv-io/kairo_bench --file "/tmp/kairo_validation.bin" --runtime "3" --hint-mode "both" --backend-mode fdp --mode mixed --models 4 --sessions 8 --cache-pools 4 --placement-groups 4 --lifetime model
+[dry-run] case: 05-zns-short-lived
+[dry-run]   dir: /mnt/c/Users/ManishKL/Documents/Playground/kv-io/results/stage7/20260622-105353/05-zns-short-lived
+[dry-run]   cmd: /mnt/c/Users/ManishKL/Documents/Playground/kv-io/kairo_bench --file "/tmp/kairo_validation.bin" --runtime "3" --hint-mode "both" --backend-mode zns --mode eviction-pressure --semantic-mode ephemeral-recomputable --recompute-ok --models 2 --sessions 8 --cache-pools 2 --placement-groups 4 --lifetime short
+
+[dry-run] Would generate summary.csv at /mnt/c/Users/ManishKL/Documents/Playground/kv-io/results/stage7/20260622-105353/summary.csv

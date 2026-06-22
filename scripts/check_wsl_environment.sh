@@ -21,6 +21,7 @@ fi
 kernel_release="$(uname -r 2>/dev/null || echo unknown)"
 distro="$(
   if [[ -r /etc/os-release ]]; then
+    # shellcheck disable=SC1091
     . /etc/os-release
     printf '%s\n' "${PRETTY_NAME:-${NAME:-unknown}}"
   else
@@ -35,7 +36,7 @@ has_sys_block=false
 available_block_devices=""
 if [[ -d /sys/block ]]; then
   has_sys_block=true
-  available_block_devices="$(ls /sys/block 2>/dev/null | paste -sd ',' -)"
+  available_block_devices="$(find /sys/block -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | paste -sd ',' -)"
 fi
 
 default_test_file="/tmp/kairo_validation.bin"

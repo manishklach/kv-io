@@ -1,0 +1,29 @@
+[dry-run] results dir: /mnt/c/Users/ManishKL/Documents/Playground/kv-io/results/stage6/20260622-105244
+========================================
+ Stage 6.5: Placement Experiment Harness
+========================================
+Benchmark:   /mnt/c/Users/ManishKL/Documents/Playground/kv-io/kairo_bench
+File:        /tmp/kairo_validation.bin
+Block dev:   loop0
+Duration:    3s
+Hint mode:   both
+Results:     /mnt/c/Users/ManishKL/Documents/Playground/kv-io/results/stage6/20260622-105244
+*** DRY RUN ***
+
+[dry-run] case: 01-single-model-single-session
+[dry-run]   dir: /mnt/c/Users/ManishKL/Documents/Playground/kv-io/results/stage6/20260622-105244/01-single-model-single-session
+[dry-run]   cmd: /mnt/c/Users/ManishKL/Documents/Playground/kv-io/kairo_bench --file "/tmp/kairo_validation.bin" --runtime "3" --hint-mode "both" --mode mixed --models 1 --sessions 1 --cache-pools 1 --placement-groups 1 --lifetime session
+[dry-run] case: 02-multi-session-single-model
+[dry-run]   dir: /mnt/c/Users/ManishKL/Documents/Playground/kv-io/results/stage6/20260622-105244/02-multi-session-single-model
+[dry-run]   cmd: /mnt/c/Users/ManishKL/Documents/Playground/kv-io/kairo_bench --file "/tmp/kairo_validation.bin" --runtime "3" --hint-mode "both" --mode multisession --models 1 --sessions 8 --cache-pools 1 --placement-groups 4 --lifetime session
+[dry-run] case: 03-multi-model-multi-session
+[dry-run]   dir: /mnt/c/Users/ManishKL/Documents/Playground/kv-io/results/stage6/20260622-105244/03-multi-model-multi-session
+[dry-run]   cmd: /mnt/c/Users/ManishKL/Documents/Playground/kv-io/kairo_bench --file "/tmp/kairo_validation.bin" --runtime "3" --hint-mode "both" --mode multisession --models 4 --sessions 16 --cache-pools 4 --placement-groups 8 --lifetime model
+[dry-run] case: 04-multi-cache-pool
+[dry-run]   dir: /mnt/c/Users/ManishKL/Documents/Playground/kv-io/results/stage6/20260622-105244/04-multi-cache-pool
+[dry-run]   cmd: /mnt/c/Users/ManishKL/Documents/Playground/kv-io/kairo_bench --file "/tmp/kairo_validation.bin" --runtime "3" --hint-mode "both" --mode mixed --models 4 --sessions 8 --cache-pools 4 --placement-groups 4 --lifetime short
+[dry-run] case: 05-recomputable-session-cache
+[dry-run]   dir: /mnt/c/Users/ManishKL/Documents/Playground/kv-io/results/stage6/20260622-105244/05-recomputable-session-cache
+[dry-run]   cmd: /mnt/c/Users/ManishKL/Documents/Playground/kv-io/kairo_bench --file "/tmp/kairo_validation.bin" --runtime "3" --hint-mode "both" --mode eviction-pressure --semantic-mode ephemeral-recomputable --recompute-ok --models 2 --sessions 8 --cache-pools 2 --placement-groups 4 --lifetime short
+
+[dry-run] Would generate summary.csv at /mnt/c/Users/ManishKL/Documents/Playground/kv-io/results/stage6/20260622-105244/summary.csv

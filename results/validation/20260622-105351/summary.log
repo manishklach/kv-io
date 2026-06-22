@@ -1,0 +1,15 @@
+timestamp=20260622-105351
+is_wsl=true
+kernel_release=6.6.87.2-microsoft-standard-WSL2+
+validate_patch_stack=pass
+make=pass
+fallback_gcc_build=not_needed
+benchmark_exists=true
+benchmark_binary=/mnt/c/Users/ManishKL/Documents/Playground/kv-io/kairo_bench
+stage6_dryrun=pass
+stage7_dryrun=pass
+stage8_dryrun=pass
+user_bench_baseline=pass
+user_bench_mixed=pass
+results_dir=/mnt/c/Users/ManishKL/Documents/Playground/kv-io/results/validation/20260622-105351
+notes=WSL validation only; no custom kernel boot, no Kairo sysfs counters, no physical NVMe placement validation.
