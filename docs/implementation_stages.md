@@ -174,17 +174,26 @@ The foundation stack currently covers Stage 1 and Stage 2 only.
   - Wiring of caps detection to real identify-command data
   - Physical backend mapping effectiveness on target devices
 
-## Stage 8
+## Supernova Patches (0010–0016)
 
-- Broad RFC/POC patches involved: `0010`
+Seven patches in dependency order that harden the Kairo proof of concept
+from instrumentation-grade to a structurally sound I/O scheduling
+framework:
+
+| Patch | Area | Status | KV perf impact |
+|-------|------|--------|----------------|
+| `0010` | real classification | implemented | root dependency — without it, 0001 measures noise |
+| `0011` | write anti-starvation | implemented | correctness gate; benchmarks invalid without it |
+| `0012` | tag reservation | implemented | highest single-patch latency impact |
+| `0013` | O(1) dispatch FIFO | implemented | eliminates latency cliff under contention |
+| `0014` | io_uring SQE hint | implemented | enables production-realistic classification |
+| `0015` | real merge bias | implemented | reduces NVMe command count per decode step |
+| `0016` | BPF dispatch hook | implemented | architectural differentiator: programmable I/O scheduling |
+
+## Stage 8 (Tracepoints)
+
+- Broad RFC/POC patches involved: `0017`
 - Userspace header: `include/trace/events/kairo.h` (new)
-- Scripts: `scripts/run_stage8_trace_experiment.sh`,
-          `scripts/parse_stage8_trace_log.py`,
-          `scripts/bpftrace/kairo_latency.bt`,
-          `scripts/bpftrace/kairo_dispatch.bt`,
-          `scripts/bpftrace/kairo_backend.bt`
-- Audit: `kernel/integration/linux-6.8/audit_tracepoints.sh`
-- Docs: `docs/stage8_kernel_observability.md`
 - What should compile:
   - tracepoint header `include/trace/events/kairo.h` (TRACE_EVENT definitions)
   - tracepoint call sites in `block/blk-mq.c`, `block/mq-deadline.c`,

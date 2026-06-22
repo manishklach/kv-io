@@ -1,0 +1,95 @@
+From 1414141414140000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kairo POC <kairo-poc@local>
+Date: Mon, 22 Jun 2026 06:40:00 -0700
+Subject: [RFC/POC PATCH 14/16] io_uring: add IORING_SQE_KAIRO_CLASS for
+ per-IO hint
+
+The current user-space hint mechanism uses ioprio (process-level), which
+means an inference framework has to set the entire thread's ioprio to
+RT:0 for decode threads. That is coarse and creates problems when a
+thread issues mixed I/O (e.g., a decode read followed by a metadata
+write). Per-IO classification via io_uring is the correct granularity.
+
+This patch introduces IORING_SQE_KAIRO_CLASS, an SQE flag that tells
+the kernel to interpret sqe->kairo_class as an enum kairo_io_class
+value. The value propagates through the existing hint infrastructure
+from patches 0002 and 0003: io_kiocb -> kiocb -> bio -> request.
+
+The benchmark harness upgrades from ioprio_set() syscalls to setting
+IORING_SQE_KAIRO_CLASS on each SQE, which is also how a real vLLM
+integration would work.
+
+KV perf impact: Enables correct per-IO classification in production-
+realistic workloads. The ioprio proxy works for the benchmark but
+breaks for any real framework that issues mixed I/O from the same
+thread.
+
+diff --git a/include/uapi/linux/io_uring.h b/include/uapi/linux/io_uring.h
+index 912a5e8..f6c2b7d 100755
+--- a/include/uapi/linux/io_uring.h
++++ b/include/uapi/linux/io_uring.h
+@@
++/*
++ * Kairo per-IO classification flag.
++ *
++ * When set, sqe->kairo_class holds an enum kairo_io_class value
++ * (KAIRO_IO_DECODE_READ = 1, KAIRO_IO_PREFETCH_READ = 2, etc.).
++ * The value overrides any process-level ioprio classification for
++ * this specific IO.
++ *
++ * Local Kairo RFC/POC. Not stable UAPI.
++ */
++#define IORING_SQE_KAIRO_CLASS	(1U << 17)
+
+ struct io_uring_sqe {
+ 	...
++	union {
++		__u8	kairo_class;	/* enum kairo_io_class, IORING_SQE_KAIRO_CLASS */
++		__u8	__pad_for_kairo[1];
++	};
+ 	__u8	pad[0];
+ };
+
+diff --git a/io_uring/io_uring.c b/io_uring/io_uring.c
+index d8f6e0a..b1c3f7a 100755
+--- a/io_uring/io_uring.c
++++ b/io_uring/io_uring.c
+@@
++/*
++ * Kairo SQE hint propagation.
++ *
++ * When IORING_SQE_KAIRO_CLASS is set on the SQE, copy the
++ * kairo_class value into the io_kiocb so the existing hint
++ * plumbing (patch 0003) can carry it through to the request.
++ */
++static inline void io_kairo_sqe_to_kiocb(struct io_kiocb *req,
++					 struct kiocb *kiocb)
++{
++	const struct io_uring_sqe *sqe = req->sqe;
++
++	if (sqe->flags & IORING_SQE_KAIRO_CLASS) {
++		u8 kairo_class = READ_ONCE(sqe->kairo_class);
++
++		/*
++		 * Map the per-IO kairo_class to the kiocb flag so the
++		 * existing bio_set_kairo_from_kiocb() path in patch 0003
++		 * picks it up. If kairo_class is 0 (KAIRO_IO_NONE),
++		 * fall through to ioprio-based classification.
++		 */
++		switch (kairo_class) {
++		case 1: /* KAIRO_IO_DECODE_READ */
++			kiocb->ki_flags |= IOCB_KAIRO_DECODE;
++			break;
++		case 2: /* KAIRO_IO_PREFETCH_READ */
++			kiocb->ki_flags |= IOCB_KAIRO_PREFETCH;
++			break;
++		case 3: /* KAIRO_IO_PREFILL_WRITE */
++			kiocb->ki_flags |= IOCB_KAIRO_PREFILL;
++			break;
++		case 4: /* KAIRO_IO_EVICT */
++			kiocb->ki_flags |= IOCB_KAIRO_EVICT_CLEANUP;
++			break;
++		}
++	}
++}
+ 

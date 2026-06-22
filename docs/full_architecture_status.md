@@ -11,7 +11,14 @@
 | placement/lifetime | `0007` | implemented | model/session/lifetime metadata with helpers and synthetic defaults |
 | NVMe/ZNS/FDP mapping | `0008` | implemented | generic backend mapping scaffold: `kairo_backend_class`, `kairo_backend_hint`, feature-detected NVMe hooks with no-op fallback; benchmark-visible via `--backend-mode` |
 | debug counters | `0009` | implemented | compile-targeted Linux 6.8.x sysfs counters and tunables; Stage 6 scaffold placement/lifetime counters |
-| tracepoints | `0010` | scaffolded | RFC/POC tracepoint layer: 9 tracepoints covering classification, scheduler decisions, dispatch, demotion, merge, semantic flags, placement metadata, and backend mapping; bpftrace scripts; trace experiment harness; trace parser |
+| tracepoints | `0017` | scaffolded | RFC/POC tracepoint layer: 9 tracepoints covering classification, scheduler decisions, dispatch, demotion, merge, semantic flags, placement metadata, and backend mapping; bpftrace scripts; trace experiment harness; trace parser |
+| real classification | `0010` | implemented | Real ioprio-to-class mapping at request init time; replaces deferred classification from 0002 |
+| write anti-starvation | `0011` | implemented | Per-write expiry deadline preventing indefinite deferral; sysfs tunable |
+| tag reservation | `0012` | implemented | Reserve 1/8 of blk-mq tags for decode reads; prevents tag starvation upstream of scheduler |
+| O(1) dispatch FIFO | `0013` | implemented | Dedicated decode/prefetch FIFOs replacing O(n) spinlock scan |
+| io_uring SQE hint | `0014` | implemented | IORING_SQE_KAIRO_CLASS for per-IO classification |
+| real merge bias | `0015` | implemented | kairo_attempt_forced_merge() with safety checks; fills empty body from 0004 |
+| BPF dispatch hook | `0016` | conceptual | BPF_PROG_TYPE_KAIRO_SCHED for programmable I/O scheduling |
 
 ## Stage 6.5 Status
 
@@ -20,6 +27,18 @@
 | Placement experiment harness | implemented | Hardened `run_stage6_placement_experiment.sh` with `<file-path> <block-device>`, structured results, counter deltas, CSV output |
 | Summary parser | implemented | `parse_stage6_placement_summary.py` with `--csv` and `--pretty` output, counter delta columns |
 | Counter coverage | updated | `collect_kairo_counters.sh` includes both naming sets for Stage 6 counters |
+
+## Supernova Patch Status (0010–0016)
+
+| Area | Patch | Status | Notes |
+|------|-------|--------|-------|
+| Real request classification | 0010 | implemented | `kairo_classify_request()` called at request init time; stores io_class for request lifetime |
+| Write anti-starvation deadline | 0011 | implemented | `kairo_write_force_deadline_ns` prevents indefinite write deferral under decode pressure |
+| NVMe tag reservation | 0012 | implemented | `kairo_tag_reserve_allowed()` reserves 1/8 of blk-mq tags for decode reads |
+| O(1) decode dispatch | 0013 | implemented | `per_prio->kairo_decode_head` dedicated FIFO with O(1) pop |
+| io_uring SQE hint flag | 0014 | implemented | `IORING_SQE_KAIRO_CLASS` for per-IO classification in io_uring SQE |
+| Real merge bias | 0015 | implemented | `kairo_attempt_forced_merge()` with integrity, sector, and class checks |
+| BPF dispatch hook | 0016 | conceptual | `BPF_PROG_TYPE_KAIRO_SCHED` — BPF verifier integration is kernel-version-specific |
 
 ## Stage 8 Status
 

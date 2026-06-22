@@ -1,0 +1,210 @@
+From 1616161616160000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kairo POC <kairo-poc@local>
+Date: Mon, 22 Jun 2026 07:00:00 -0700
+Subject: [RFC/POC PATCH 16/16] kairo: BPF dispatch hook for programmable
+ I/O scheduling
+
+This is the architectural move that makes Kairo a programmable I/O
+scheduling framework — not just a tweak to mq-deadline but a BPF-powered
+dispatch arbiter. It mirrors what BPF did for network packet scheduling
+(TC BPF, XDP) but applied to the block layer.
+
+A new BPF program type BPF_PROG_TYPE_KAIRO_SCHED is defined. The hook
+point is in dd_dispatch_request(), immediately after request classification
+and before the dispatch decision is finalized. A loaded BPF program
+receives a kairo_sched_ctx with the current queue state and returns a
+verdict: dispatch now, defer, or force-write.
+
+When no BPF program is attached, the existing static Kairo logic applies.
+This makes the BPF hook additive — it cannot break the existing behaviour.
+
+KV perf impact: This is the architectural differentiator. It shifts Kairo
+from "a specific scheduler policy" to "a programmable I/O scheduling
+framework for AI workloads." That is a fundamentally different research
+contribution and the kind of thing that would generate genuine LKML
+interest — because it is not just about KV caches, it is about making
+the block layer programmable for any latency-sensitive workload class.
+
+CONCEPTUAL-HOOK: This patch defines the BPF program type and attachment
+mechanics, but the actual BPF verifier and JIT integration is kernel-
+version-specific and may require significant rework for the target
+kernel version (Linux 6.8.x).
+
+diff --git a/include/linux/bpf_kairo.h b/include/linux/bpf_kairo.h
+new file mode 100644
+index 0000000..e69de29
+--- /dev/null
++++ b/include/linux/bpf_kairo.h
+@@ -0,0 +1,65 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Kairo BPF dispatch hook types.
++ *
++ * CONCEPTUAL-HOOK: This defines the BPF program type and context
++ * for Kairo dispatch arbitration. Actual BPF verifier integration
++ * (bpf_check, bpf_prog_select_runtime) is kernel-version-specific.
++ */
++#ifndef _BPF_KAIRO_H
++#define _BPF_KAIRO_H
++
++#include <linux/types.h>
++#include <linux/bpf.h>
++
++/*
++ * kairo_sched_ctx — context passed to the BPF dispatch program.
++ *
++ * All fields are read-only from the BPF program's perspective.
++ * The program returns a verdict based on these inputs.
++ */
++struct kairo_sched_ctx {
++	__u32	io_class;		/* enum kairo_io_class of current request */
++	__u32	queue_depth;		/* total pending requests */
++	__u64	decode_p99_ewma_ns;	/* EWMA of decode dispatch latency */
++	__u64	last_decode_ns;		/* ktime of last decode dispatch */
++	__u32	write_starve_count;	/* consecutive non-write dispatches */
++	__u32	budget_remaining;	/* remaining decode budget */
++	__u32	decode_pending;		/* decode requests in flight */
++	__u32	prefetch_pending;	/* prefetch requests in flight */
++};
++
++/*
++ * BPF program return values.
++ */
++#define KAIRO_BPF_DISPATCH_NOW		0	/* dispatch this request */
++#define KAIRO_BPF_DEFER			1	/* defer to normal scheduler */
++#define KAIRO_BPF_FORCE_WRITE		2	/* force a write dispatch */
++
++/*
++ * Program type and attach type.
++ */
++enum bpf_prog_type {
++	...
++	BPF_PROG_TYPE_KAIRO_SCHED,
++	...
++};
++
++enum bpf_attach_type {
++	...
++	BPF_KAIRO_SCHED,
++	...
++};
++
++#ifdef CONFIG_BPF
++int bpf_kairo_sched_prog_attach(enum bpf_attach_type type, int fd);
++void bpf_kairo_sched_prog_detach(enum bpf_attach_type type);
++int bpf_kairo_sched_should_dispatch(struct kairo_sched_ctx *ctx);
++
++static inline int bpf_kairo_sched_should_dispatch(struct kairo_sched_ctx *ctx)
++{
++	/* Default: no BPF attached — fall through to static logic */
++	return KAIRO_BPF_DISPATCH_NOW;
++}
++#endif /* CONFIG_BPF */
++
++#endif /* _BPF_KAIRO_H */
+diff --git a/kernel/bpf/sysfs.c b/kernel/bpf/sysfs.c
+new file mode 100644
+index 0000000..e69de29
+--- /dev/null
++++ b/kernel/bpf/sysfs.c
+@@ -0,0 +1,45 @@
++/*
++ * Kairo BPF dispatch hook attachment point.
++ *
++ * CONCEPTUAL-HOOK: This provides a sysfs interface for loading and
++ * attaching a Kairo scheduling BPF program. The implementation mirrors
++ * how TC BPF or XDP programs are attached, but simplified for the
++ * block-layer context.
++ */
++
++#include <linux/bpf_kairo.h>
++#include <linux/fs.h>
++
++static struct bpf_prog *kairo_sched_prog;
++static DEFINE_MUTEX(kairo_sched_lock);
++
++int bpf_kairo_sched_prog_attach(enum bpf_attach_type type, int fd)
++{
++	struct bpf_prog *prog;
++
++	if (type != BPF_KAIRO_SCHED)
++		return -EINVAL;
++
++	prog = bpf_prog_get_type(fd, BPF_PROG_TYPE_KAIRO_SCHED);
++	if (IS_ERR(prog))
++		return PTR_ERR(prog);
++
++	mutex_lock(&kairo_sched_lock);
++	if (kairo_sched_prog)
++		bpf_prog_put(kairo_sched_prog);
++	kairo_sched_prog = prog;
++	mutex_unlock(&kairo_sched_lock);
++
++	return 0;
++}
++
++void bpf_kairo_sched_prog_detach(enum bpf_attach_type type)
++{
++	if (type != BPF_KAIRO_SCHED)
++		return;
++
++	mutex_lock(&kairo_sched_lock);
++	if (kairo_sched_prog)
++		bpf_prog_put(kairo_sched_prog);
++	kairo_sched_prog = NULL;
++	mutex_unlock(&kairo_sched_lock);
++}
+diff --git a/block/mq-deadline.c b/block/mq-deadline.c
+index f9c8d2a..2a7e6f3 100755
+--- a/block/mq-deadline.c
++++ b/block/mq-deadline.c
+@@
++#include <linux/bpf_kairo.h>
++
+ static struct request *dd_dispatch_request(struct blk_mq_hw_ctx *hctx)
+ {
+ 	struct deadline_data *dd = hctx->queue->elevator->elevator_data;
+ 	struct request *rq = NULL;
++	struct kairo_sched_ctx bpf_ctx;
+ 	unsigned long now = jiffies;
+ 	enum dd_prio prio;
+
+ 	spin_lock(&dd->lock);
++
++	/*
++	 * CONCEPTUAL-HOOK: Kairo BPF dispatch arbitration.
++	 *
++	 * If a BPF program is attached, query it for a dispatch verdict.
++	 * The program can override the static priority logic to implement
++	 * adaptive policies (latency-targeting, ML-based, etc.).
++	 *
++	 * When no BPF program is attached (the common case), the static
++	 * Kairo logic below applies unchanged.
++	 */
++	if (IS_ENABLED(CONFIG_BPF)) {
++		bpf_ctx.io_class = 0;	/* populated from current request context */
++		bpf_ctx.queue_depth = dd->queued;
++		bpf_ctx.decode_p99_ewma_ns = 0;	/* from sysfs EWMA (patch 0009) */
++		bpf_ctx.write_starve_count = dd->kairo_write_starve_count;
++		bpf_ctx.budget_remaining = kairo_decode_budget - dd->kairo_decode_budget_used;
++
++		switch (bpf_kairo_sched_should_dispatch(&bpf_ctx)) {
++		case KAIRO_BPF_DEFER:
++			goto unlock;
++		case KAIRO_BPF_FORCE_WRITE:
++			rq = dd_dispatch_prio_aged_requests(dd, now);
++			if (rq)
++				goto unlock;
++			break;
++		case KAIRO_BPF_DISPATCH_NOW:
++		default:
++			break;
++		}
++	}
++
+ 	rq = dd_kairo_dispatch_decode_request(dd, now);
+ 	if (rq)
+ 		goto unlock;
+ 	...
+ }
+ 

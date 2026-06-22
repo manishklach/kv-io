@@ -1,0 +1,139 @@
+From 1111111111110000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kairo POC <kairo-poc@local>
+Date: Mon, 22 Jun 2026 06:10:00 -0700
+Subject: [RFC/POC PATCH 11/16] mq-deadline: Kairo write anti-starvation deadline
+
+The current budget-reset logic in patch 0001 has a correctness hole:
+kairo_decode_budget_used resets to 0 on every normal dispatch, but there
+is no mechanism to force a normal dispatch when prefill writes are
+starving. Under sustained decode load with continuous RT:0 reads arriving,
+writes can be deferred indefinitely.
+
+This patch adds a per-device write-force deadline: when a prefill write
+is inserted, a forced-dispatch deadline is set. If the deadline expires
+before the write is dispatched, the decode dispatch path returns NULL
+to force fall-through to normal write dispatch.
+
+Exposes kairo_write_deadline_ms as a sysfs tunable (default 100 ms).
+
+KV perf impact: Correctness, not performance. But without it, benchmarks
+showing good decode_p99_us are invalid because writes are being starved.
+
+diff --git a/block/mq-deadline.c b/block/mq-deadline.c
+index 82a979d..b4e7f31 100755
+--- a/block/mq-deadline.c
++++ b/block/mq-deadline.c
+@@ -10,6 +10,7 @@
+ #include <linux/kernel.h>
+ #include <linux/blkdev.h>
+ #include <linux/blk-mq.h>
++#include <linux/ktime.h>
+ #include <linux/elevator.h>
+ #include <linux/keywords.h>
+
+@@ -40,6 +41,7 @@ static const int fifo_batch = 16;
+ static bool kairo_enable = true;
+ static unsigned int kairo_decode_budget = 32;
++static unsigned int kairo_write_deadline_ms = 100;
+
+ enum dd_data_dir {
+ 	DD_READ		= READ,
+@@ -96,6 +98,8 @@ struct deadline_data {
+ 	u64 kairo_starvation_escapes;
+ 	unsigned int kairo_decode_budget_used;
++	ktime_t kairo_write_force_deadline_ns;
++	u32 kairo_write_starve_count;
+
+ 	/*
+ 	 * settings that change how the i/o scheduler behaves
+@@ -566,6 +570,18 @@ static struct request *dd_kairo_dispatch_decode_request(struct deadline_data *dd,
+ {
+ 	struct dd_per_prio *per_prio = &dd->per_prio[DD_RT_PRIO];
+ 	struct request *rq;
++	ktime_t now_ns;
++
++	/*
++	 * Anti-starvation: if a write-force deadline has been set and has
++	 * expired, fall through to normal dispatch so writes can make
++	 * progress. This prevents indefinite write deferral under sustained
++	 * decode read pressure.
++	 */
++	if (dd->kairo_write_force_deadline_ns) {
++		now_ns = ktime_get_ns();
++		if (now_ns >= dd->kairo_write_force_deadline_ns)
++			return NULL;
++	}
+
+ 	lockdep_assert_held(&dd->lock);
+
+@@ -643,6 +659,9 @@ static void dd_kairo_note_demotions(struct deadline_data *dd,
+ static void dd_finalize_request(struct deadline_data *dd,
+ 				struct request *rq)
+ {
++	/* Clear write-force deadline on any write dispatch */
++	if (op_is_write(req_op(rq)))
++		dd->kairo_write_force_deadline_ns = 0;
+ }
+
+ static struct request *dd_dispatch_request(struct blk_mq_hw_ctx *hctx)
+@@ -691,6 +710,27 @@ static struct request *dd_dispatch_request(struct blk_mq_hw_ctx *hctx)
+ 	return rq;
+ }
+
++static void dd_kairo_insert_request(struct deadline_data *dd,
++				    struct request *rq)
++{
++	if (!kairo_enable)
++		return;
++
++	/*
++	 * When a prefill write is inserted, set (or refresh) the write-force
++	 * deadline. If no write-force deadline has been set, this is the
++	 * first write enqueued under decode pressure.
++	 *
++	 * The deadline gives decode reads kairo_write_deadline_ms of
++	 * continuous dispatch before writes are forcibly served.
++	 */
++	if (kairo_is_prefill_write(rq) &&
++	    !dd->kairo_write_force_deadline_ns) {
++		dd->kairo_write_force_deadline_ns =
++			ktime_get_ns() + (kairo_write_deadline_ms * NSEC_PER_MSEC);
++	}
++}
++
+ /*
+  * The batch counting logic in the standard mq-deadline path:
+
+@@ -1112,6 +1152,9 @@ static void dd_insert_requests(struct blk_mq_hw_ctx *hctx,
+ 	spin_lock(&dd->lock);
+ 	blk_mq_request_bypass_insert(rq, run_queue, false);
+
++	/* Kairo write anti-starvation deadline tracking */
++	dd_kairo_insert_request(dd, rq);
++
+ 	spin_unlock(&dd->lock);
+ }
+
+@@ -1180,6 +1223,31 @@ SHOW_IO_SCHEDULER_STATS(deadline);
++/*
++ * Kairo write anti-starvation deadline tunable.
++ *
++ * Writing 0 disables the forced deadline (writes may be deferred
++ * indefinitely under decode pressure — not recommended).
++ */
++static ssize_t kairo_write_deadline_ms_show(struct elevator_queue *e, char *page)
++{
++	return snprintf(page, PAGE_SIZE, "%u\n", kairo_write_deadline_ms);
++}
++
++static ssize_t kairo_write_deadline_ms_store(struct elevator_queue *e,
++					     const char *page, size_t count)
++{
++	unsigned int val;
++
++	if (sscanf(page, "%u", &val) != 1)
++		return -EINVAL;
++	kairo_write_deadline_ms = val;
++	return count;
++}
+ 

@@ -22,7 +22,14 @@ required_broad_patches=(
   "0007-rfc-kairo-placement-lifetime-hints.patch"
   "0008-rfc-kairo-nvme-zns-fdp-mapping.patch"
   "0009-rfc-kairo-sysfs-debug-counters.patch"
-  "0010-rfc-kairo-tracepoints-observability.patch"
+  "0010-rfc-kairo-request-classification-real.patch"
+  "0011-rfc-kairo-write-antistarvation-deadline.patch"
+  "0012-rfc-kairo-nvme-tag-reservation.patch"
+  "0013-rfc-kairo-mq-deadline-dispatch-O1.patch"
+  "0014-rfc-kairo-io-uring-sqe-hint-flag.patch"
+  "0015-rfc-kairo-merge-bias-real.patch"
+  "0016-rfc-kairo-bpf-dispatch-hook.patch"
+  "0017-rfc-kairo-tracepoints-observability.patch"
 )
 
 required_foundation_patches=(
@@ -263,7 +270,7 @@ stage7_has_pattern "$KB" "backend_class="
 stage7_has_pattern "$DOC7" "backend class"
 stage7_has_pattern "$DOC7" "KAIRO_BACKEND_NONE"
 
-# Stage 8: verify tracepoint patch and scripts
+# Stage 8: verify tracepoint patch and scripts (renumbered to 0017)
 stage8_has_pattern() {
   local file="$1" pattern="$2"
   grep -qF -- "$pattern" "$file" || fail "Stage 8: missing pattern '$pattern' in $(basename "$file")"
@@ -273,7 +280,7 @@ stage8_file_exists() {
   [[ -f "$1" ]] || fail "Stage 8: missing file: $1"
 }
 
-P10="$PATCH_DIR/0010-rfc-kairo-tracepoints-observability.patch"
+P10="$PATCH_DIR/0017-rfc-kairo-tracepoints-observability.patch"
 DOC8="$REPO_ROOT/docs/stage8_kernel_observability.md"
 R8SE="$REPO_ROOT/scripts/run_stage8_trace_experiment.sh"
 P8SP="$REPO_ROOT/scripts/parse_stage8_trace_log.py"
@@ -310,6 +317,44 @@ stage8_has_pattern "$AUDIT_TP" "kairo_request_classified"
 stage8_has_pattern "$BT_LATENCY" "kairo_decode_dispatch"
 stage8_has_pattern "$BT_DISPATCH" "kairo_scheduler_decision"
 stage8_has_pattern "$BT_BACKEND" "kairo_backend_mapped"
+
+# Stage 9+: verify new supernova patches 0010-0016
+stage9_has_pattern() {
+  local file="$1" pattern="$2"
+  grep -qF -- "$pattern" "$file" || fail "Supernova: missing pattern '$pattern' in $(basename "$file")"
+}
+
+stage9_file_exists() {
+  [[ -f "$1" ]] || fail "Supernova: missing file: $1"
+}
+
+# Patch 0010: real classification
+stage9_has_pattern "$PATCH_DIR/0010-rfc-kairo-request-classification-real.patch" \
+  "kairo_classify_request" "0010: real classification helper"
+
+# Patch 0011: write anti-starvation
+stage9_has_pattern "$PATCH_DIR/0011-rfc-kairo-write-antistarvation-deadline.patch" \
+  "kairo_write_force_deadline_ns" "0011: write anti-starvation deadline"
+
+# Patch 0012: tag reservation
+stage9_has_pattern "$PATCH_DIR/0012-rfc-kairo-nvme-tag-reservation.patch" \
+  "kairo_tag_reserve_allowed" "0012: tag reservation"
+
+# Patch 0013: O(1) decode dispatch
+stage9_has_pattern "$PATCH_DIR/0013-rfc-kairo-mq-deadline-dispatch-O1.patch" \
+  "kairo_decode_head" "0013: O(1) decode FIFO"
+
+# Patch 0014: io_uring SQE hint
+stage9_has_pattern "$PATCH_DIR/0014-rfc-kairo-io-uring-sqe-hint-flag.patch" \
+  "IORING_SQE_KAIRO_CLASS" "0014: SQE hint flag"
+
+# Patch 0015: real merge bias
+stage9_has_pattern "$PATCH_DIR/0015-rfc-kairo-merge-bias-real.patch" \
+  "kairo_attempt_forced_merge" "0015: real merge bias"
+
+# Patch 0016: BPF dispatch hook
+stage9_has_pattern "$PATCH_DIR/0016-rfc-kairo-bpf-dispatch-hook.patch" \
+  "BPF_PROG_TYPE_KAIRO_SCHED" "0016: BPF dispatch hook"
 
 required_sysfs_names=(
   "kairo_enable"

@@ -1,0 +1,112 @@
+From 1313131313130000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kairo POC <kairo-poc@local>
+Date: Mon, 22 Jun 2026 06:30:00 -0700
+Subject: [RFC/POC PATCH 13/16] mq-deadline: O(1) Kairo decode dispatch FIFO
+
+The current dd_kairo_dispatch_decode_request() does a
+list_for_each_entry() scan over the RT priority read FIFO under
+dd->lock. On a busy NVMe device this FIFO can hold hundreds of entries,
+making every decode dispatch an O(n) spinlock hold. Under high
+concurrency this creates lock contention that directly inflates tail
+latency.
+
+This patch replaces the O(n) scan with a dedicated per-priority decode
+FIFO. Requests classified as KAIRO_IO_DECODE_READ are inserted into
+per_prio->kairo_decode_head at submission time. The dispatch helper
+pops from the head in O(1) — no scan required.
+
+Kairo prefetch reads similarly get per_prio->kairo_prefetch_head for
+O(1) dispatch when prefetch dispatch is wired.
+
+The rb-tree for deadline tracking (per_prio->sort_list) remains shared.
+Only the dispatch FIFO is split — the deadline expiry mechanism still
+operates on the shared sort_list.
+
+KV perf impact: Moderate on lightly loaded queues, high under contention.
+Eliminates a latency cliff that appears only under realistic multi-session
+load.
+
+diff --git a/block/mq-deadline.c b/block/mq-deadline.c
+index b4e7f31..f9c8d2a 100755
+--- a/block/mq-deadline.c
++++ b/block/mq-deadline.c
+@@ -105,6 +105,16 @@ struct dd_per_prio {
+ 	struct list_head fifo_list[DD_DIR_COUNT];
+ 	struct rb_root sort_list[DD_DIR_COUNT];
++
++	/*
++	 * Kairo O(1) dispatch FIFOs.
++	 *
++	 * Dedicated lists for KAIRO_IO_DECODE_READ and
++	 * KAIRO_IO_PREFETCH_READ requests. These bypass the O(n)
++	 * fifo_list scan in dd_kairo_dispatch_decode_request().
++	 */
++	struct list_head kairo_decode_head;
++	struct list_head kairo_prefetch_head;
+ };
+
+ enum dd_prio {
+@@ -470,6 +480,11 @@ static void deadline_add_request(struct deadline_data *dd,
+ {
+ 	struct dd_per_prio *per_prio = &dd->per_prio[prio];
+
++	/* Route Kairo-classified requests to the O(1) FIFO */
++	if (kairo_is_decode_read(rq))
++		list_add_tail(&rq->queuelist, &per_prio->kairo_decode_head);
++	else
++		list_add_tail(&rq->queuelist, &per_prio->fifo_list[data_dir]);
++
+ 	list_add_tail(&rq->queuelist, &per_prio->fifo_list[data_dir]);
+ 	rb_add(&rq->rb_node, &per_prio->sort_list[data_dir],
+ 			deadline_rb_cmp);
+@@ -483,6 +498,21 @@ static void deadline_remove_request(struct deadline_data *dd,
+ {
+ 	struct dd_per_prio *per_prio = &dd->per_prio[prio];
+
++	/*
++	 * Remove from whichever list the request was placed on.
++	 * list_del_init is safe on both fifo_list and kairo_decode_head
++	 * because list_empty() returns true for an initialized list head.
++	 */
++	if (kairo_is_decode_read(rq))
++		list_del_init(&rq->queuelist);
++	else if (kairo_is_prefetch_read(rq))
++		list_del_init(&rq->queuelist);
++	else
++		list_del_init(&rq->queuelist);
++
++	/* Always remove from the shared rb-tree for deadline tracking */
++	rb_erase(&rq->rb_node, &per_prio->sort_list[data_dir]);
++
+ 	if (deadline_check_fifo(per_prio, data_dir) &&
+ 	    !atomic_read(&dd->queued)) {
+ 		dd->fifo_expire[data_dir] = jiffies;
+@@ -644,6 +674,27 @@ static struct request *dd_kairo_dispatch_decode_request(struct deadline_data *dd,
+ 			 */
+ 			dd->last_dir = DD_READ;
+ 			dd->batching = 1;
+-			deadline_move_request(dd, per_prio, rq);
++
++			/*
++			 * O(1) dispatch: pop from the dedicated decode head.
++			 * No list scan needed — the request is at the head.
++			 */
++			if (!list_empty(&per_prio->kairo_decode_head)) {
++				rq = list_first_entry(&per_prio->kairo_decode_head,
++						      struct request, queuelist);
++				list_del_init(&rq->queuelist);
++			} else {
++				/*
++				 * Fallback: scan the FIFO for decode requests
++				 * that may have been inserted before the
++				 * dedicated head was available (e.g., during
++				 * a transitional period).
++				 */
++				list_for_each_entry(rq, &per_prio->fifo_list[DD_READ], queuelist) {
++					if (kairo_is_decode_read(rq))
++						break;
++				}
++			}
++
+ 			dd->kairo_decode_budget_used++;
+ 			dd->kairo_decode_dispatches++;

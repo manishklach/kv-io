@@ -22,7 +22,14 @@ local apply/build target for Stage 1 and Stage 2 validation.
 | `0007` | placement/lifetime | `blk-mq`, `blk_types` | model/session/lifetime metadata with helpers and synthetic defaults |
 | `0008` | NVMe mapping | `blk_types`, `blk-mq`, `drivers/nvme/host` | generic backend mapping scaffold: `enum kairo_backend_class`, `struct kairo_backend_hint`, feature-detected NVMe hooks with no-op fallback; benchmark-visible via `--backend-mode` |
 | `0009` | observability | `mq-deadline`, `debugfs` | counters proving Kairo code paths: dispatch, merge instrumentation, request-size histogram; Stage 6 placement/lifetime counters; Stage 7 backend mapping counters |
-| `0010` | tracepoints | `block/blk-mq`, `block/mq-deadline`, `block/blk-merge`, `drivers/nvme/host` | RFC/POC Kairo tracepoint scaffold: 9 TRACE_EVENT definitions in `include/trace/events/kairo.h`; conceptual call sites across block and NVMe layers; bpftrace scripts; trace experiment harness; trace log parser |
+| `0010` | classification | `blk-mq`, `blk_types` | Real ioprio-to-class request classification at bio-to-request conversion time; replaces deferred classification from 0002 |
+| `0011` | anti-starvation | `mq-deadline` | Per-write expiry deadline preventing indefinite deferral under decode pressure; `kairo_write_deadline_ms` sysfs tunable |
+| `0012` | tag reservation | `blk-mq-tag` | Reserve 1/8 of hardware queue tags for Kairo decode reads; prevents tag starvation upstream of the scheduler |
+| `0013` | dispatch | `mq-deadline` | O(1) decode dispatch FIFO replacing O(n) FIFO scan under spinlock; per-priority dedicated decode/prefetch lists |
+| `0014` | io_uring | `io_uring`, `uapi` | `IORING_SQE_KAIRO_CLASS` SQE flag for per-IO classification; propagates through existing hint infrastructure |
+| `0015` | merge | `blk-merge` | Real merge bias implementation filling in the empty body from 0004; `kairo_attempt_forced_merge()` with safety checks |
+| `0016` | BPF hook | `bpf`, `mq-deadline` | BPF_PROG_TYPE_KAIRO_SCHED for programmable I/O dispatch arbitration; additive fallback to static logic |
+| `0017` | tracepoints | `block/blk-mq`, `block/mq-deadline`, `block/blk-merge`, `drivers/nvme/host` | RFC/POC Kairo tracepoint scaffold: 9 TRACE_EVENT definitions in `include/trace/events/kairo.h`; conceptual call sites across block and NVMe layers; bpftrace scripts; trace experiment harness; trace log parser |
 
 ## Design Themes
 

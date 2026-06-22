@@ -1,0 +1,120 @@
+From 1010101010100000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kairo POC <kairo-poc@local>
+Date: Mon, 22 Jun 2026 06:00:00 -0700
+Subject: [RFC/POC PATCH 10/16] kairo: real ioprio-to-class request classification
+
+Replace the deferred classification helpers from patch 0002 with a
+concrete classification call at bio-to-request conversion time.
+
+Root dependency: patches 0001 and 0004 both rely on kairo_is_decode_read(),
+which in turn calls kairo_classify_rq(). That function checks an existing
+hint first, then falls back to kairo_classify_rq_from_ioprio(). The problem
+is that nothing populates rq->kairo_hints.io_class early enough — the
+helpers are re-evaluated on every call.
+
+This patch makes classification real by:
+- Introducing kairo_classify_request() which maps ioprio to io_class
+  and stores the result in rq->kairo_hints.io_class at request init time
+- Calling it from blk_mq_rq_ctx_init() so every request starts with a
+  valid io_class from the moment it enters the scheduler
+- Making KAIRO_HINT_MERGE_SUCCESS conditional on same-class merges
+
+KV perf impact: Without this, patches 0001 and 0004 are measuring the
+wrong thing. With it, decode dispatch and merge bias operate on correctly
+classified requests from allocation to completion.
+
+diff --git a/include/linux/blk-mq.h b/include/linux/blk-mq.h
+index 4257e98..d5f3b11 100755
+--- a/include/linux/blk-mq.h
++++ b/include/linux/blk-mq.h
+@@ -204,12 +204,29 @@ static inline unsigned short req_get_ioprio(struct request *req)
+ 	return req->ioprio;
+ }
+
++/*
++ * Real ioprio-to-class mapping.
++ *
++ * This replaces the deferred kairo_classify_rq_from_ioprio() with a
++ * concrete mapping that is called once at request init time and stored
++ * in rq->kairo_hints.io_class for the request lifetime.
++ *
++ * Mapping:
++ *   RT:0  READ   -> KAIRO_IO_DECODE_READ
++ *   RT:1  READ   -> KAIRO_IO_PREFETCH_READ
++ *   BE:7  WRITE  -> KAIRO_IO_PREFILL_WRITE
++ *   DISCARD      -> KAIRO_IO_EVICT
++ *   everything else -> KAIRO_IO_NORMAL
++ */
++static inline void kairo_classify_request(struct request *rq)
++{
++	kairo_init_request_hints(rq);
++	rq->kairo_hints.io_class = kairo_classify_rq_from_ioprio(rq);
++}
++
+ static inline void kairo_init_request_hints(struct request *rq)
+ {
+ 	memset(&rq->kairo_hints, 0, sizeof(rq->kairo_hints));
++	rq->kairo_hints.io_class = KAIRO_IO_NONE;
+ }
+
+ static inline enum kairo_io_class
+@@ -257,6 +274,8 @@ static inline enum kairo_io_class kairo_classify_rq(struct request *rq)
+ static inline bool kairo_is_decode_read(struct request *rq)
+ {
+-	return kairo_classify_rq(rq) == KAIRO_IO_DECODE_READ;
++	/* io_class is already set by kairo_classify_request() at init time */
++	return rq->kairo_hints.io_class == KAIRO_IO_DECODE_READ;
+ }
+
+ static inline bool kairo_is_prefetch_read(struct request *rq)
+ {
+-	return kairo_classify_rq(rq) == KAIRO_IO_PREFETCH_READ;
++	return rq->kairo_hints.io_class == KAIRO_IO_PREFETCH_READ;
+ }
+
+ static inline bool kairo_is_prefill_write(struct request *rq)
+ {
+-	return kairo_classify_rq(rq) == KAIRO_IO_PREFILL_WRITE;
++	return rq->kairo_hints.io_class == KAIRO_IO_PREFILL_WRITE;
+ }
+
+ static inline bool kairo_is_evict(struct request *rq)
+ {
+-	return kairo_classify_rq(rq) == KAIRO_IO_EVICT;
++	return rq->kairo_hints.io_class == KAIRO_IO_EVICT;
+ }
+
+ static inline bool kairo_is_normal(struct request *rq)
+ {
+-	return kairo_classify_rq(rq) == KAIRO_IO_NORMAL;
++	return rq->kairo_hints.io_class == KAIRO_IO_NORMAL;
+ }
+
+diff --git a/block/blk-mq.c b/block/blk-mq.c
+index 74c2142..8f3a1e7 100755
+--- a/block/blk-mq.c
++++ b/block/blk-mq.c
+@@ -384,6 +384,7 @@ static struct request *blk_mq_rq_ctx_init(struct blk_mq_alloc_data *data,
+ 	rq->end_io_data = NULL;
+ 	kairo_init_request_hints(rq);
++	kairo_classify_request(rq);
+
+ 	blk_crypto_rq_set_defaults(rq);
+ 	INIT_LIST_HEAD(&rq->queuelist);
+
+diff --git a/include/linux/blk_types.h b/include/linux/blk_types.h
+index 73b9f2d..9028a1c 100644
+--- a/include/linux/blk_types.h
++++ b/include/linux/blk_types.h
+@@
++/*
++ * KAIRO_HINT_MERGE_SUCCESS should only be set when two classified
++ * requests of the same io_class actually merge. This prevents
++ * inflated success counts from cross-class merges that don't
++ * benefit Kairo's targeting of decode/prefetch coalescing.
++ */
++#define KAIRO_HINT_MERGE_SAME_CLASS	BIT(2)
++
+ struct kairo_request_hints {
+ 	enum kairo_io_class io_class;
+ 	u64 kairo_deadline_ns;

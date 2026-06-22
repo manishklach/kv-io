@@ -1,0 +1,124 @@
+From 1515151515150000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kairo POC <kairo-poc@local>
+Date: Mon, 22 Jun 2026 06:50:00 -0700
+Subject: [RFC/POC PATCH 15/16] block: implement Kairo merge bias
+
+Patch 0004 added merge-instrumentation flags and the helper functions
+kairo_should_bias_merge() and kairo_merge_within_limits(), but the
+bias body in attempt_merge() was an empty comment block — the merge
+decision still fell through to vanilla blk-merge logic.
+
+This patch fills in the bias body. When a Kairo-classified decode or
+prefetch read is a merge candidate and within limits, we explicitly
+invoke ll_back_merge_fn() (or its equivalent) rather than letting the
+generic path decide. The forced merge is only attempted when:
+  - The request and bio are same-class (decode+decode, prefetch+prefetch)
+  - Queue limits (max sectors, max segments, integrity) are satisfied
+  - The total size does not exceed KAIRO_MERGE_BIAS_SECTORS (2 MiB)
+
+A new sysfs counter kairo_forced_merges tracks successful forced merges,
+distinct from the existing KAIRO_HINT_MERGE_SUCCESS instrumentation.
+
+KV perf impact: Moderate. Reduces NVMe command count per decode step by
+increasing average request size toward 2 MiB. On PCIe Gen4/5 drives where
+command processing overhead is non-trivial, this matters.
+
+diff --git a/block/blk-merge.c b/block/blk-merge.c
+index b987ab2..d4f6e3c 100755
+--- a/block/blk-merge.c
++++ b/block/blk-merge.c
+@@
++#include <linux/blk-mq.h>
++
++/*
++ * Kairo forced merge counter.
++ * Incremented each time a Kairo merge bias successfully coalesces a
++ * decode/prefetch read beyond what the generic blk-merge path would do.
++ */
++static u64 kairo_forced_merges;
++
++/*
++ * kairo_attempt_forced_merge — attempt a Kairo-biased back-merge.
++ *
++ * Returns true if the bio was merged into the request. This is a
++ * conservative wrapper: it checks all standard safety constraints
++ * before calling the low-level merge function.
++ *
++ * The intent is to bias toward merging decode-classified reads into
++ * larger requests (up to KAIRO_MERGE_BIAS_SECTORS) without bypassing
++ * any safety check that the normal path would apply.
++ */
++static bool kairo_attempt_forced_merge(struct request_queue *q,
++				       struct request *rq, struct bio *bio)
++{
++	enum kairo_io_class rq_class = rq->kairo_hints.io_class;
++	enum kairo_io_class bio_class = KAIRO_IO_NONE;
++
++	/* Only attempt forced merge for Kairo-classified reads */
++	if (rq_class != KAIRO_IO_DECODE_READ &&
++	    rq_class != KAIRO_IO_PREFETCH_READ)
++		return false;
++
++	/* Must be a merge candidate */
++	if (!kairo_is_merge_candidate(rq, bio))
++		return false;
++
++	/* Must be within queue limits */
++	if (!kairo_merge_within_limits(q, rq, bio))
++		return false;
++
++	/* Integrity check — must not bypass blk integrity */
++	if (blk_integrity_merge_bio(q, rq, bio) < 0)
++		return false;
++
++	/*
++	 * Safe to proceed: all standard constraints are satisfied.
++	 * Hand off to the low-level back-merge function.
++	 */
++	if (ll_back_merge_fn(rq, bio, bio_sectors(bio))) {
++		kairo_forced_merges++;
++		return true;
++	}
++
++	return false;
++}
++
+ static struct request *attempt_merge(struct request_queue *q,
+ 				     struct request *rq, struct bio *bio)
+ {
+@@ -124,16 +165,28 @@ static struct request *attempt_merge(struct request_queue *q,
+ 	if (kairo_is_merge_candidate(rq, bio)) {
+ 		rq->kairo_hints.flags |= KAIRO_HINT_MERGE_ATTEMPTED;
+ 		if (kairo_should_bias_merge(rq, bio) &&
+-		    kairo_merge_within_limits(q, rq, bio)) {
++		    kairo_merge_within_limits(q, rq, bio) &&
++		    rq->kairo_hints.io_class == bio_class) {
+ 			/*
+-			 * Bias hint: encourage the existing merge logic to
+-			 * complete this merge when the resulting request is
+-			 * still a large-but-safe KV-cache read.
++			 * Kairo forced merge: attempt a back-merge here
++			 * rather than deferring to the generic path.
++			 * If successful, the request absorbs the bio and
++			 * we return the merged request immediately.
+ 			 */
++			if (kairo_attempt_forced_merge(q, rq, bio)) {
++				rq->kairo_hints.flags |= KAIRO_HINT_MERGE_SUCCESS;
++				return rq;
++			}
+ 		}
+ 	}
+ 	...
+ }
++
++/*
++ * Expose kairo_forced_merges for sysfs/scheduler counters.
++ * This lets the benchmark and experiment harness observe whether
++ * merge bias is actively coalescing decode/prefetch reads.
++ */
++u64 kairo_get_forced_merges(void)
++{
++	return kairo_forced_merges;
++}
++EXPORT_SYMBOL_GPL(kairo_get_forced_merges);
+ 
