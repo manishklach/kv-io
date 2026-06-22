@@ -20,7 +20,10 @@ Kairo explores whether Linux block-layer changes can improve generic NVMe SSD be
 - internal RFC/POC
 - experimental kernel path
 - benchmark-driven validation
-- local multi-patch kernel RFC/POC series centered on `mq-deadline`, `blk-mq`, `io_uring`, and generic NVMe hooks
+- implemented patch areas in the repo today: `0001` decode priority, `0002` request classification, `0004` request shaping / merge instrumentation, `0009` observability counters
+- scaffolded patch areas in the repo today: `0003` io_uring/RWF hint propagation, `0005` prefetch deadlines, `0006` ephemeral/recomputable semantics, `0007` placement/lifetime hints, `0008` generic NVMe backend mapping
+- tracked validation status for Linux `6.8.12`: patch apply `yes`, block build `yes`, boot test `pending`, sysfs counter visibility `pending`, benchmark runs `pending`, decode counter increment check `pending`
+- additional Linux `6.8.x` validation rows remain `pending` in [docs/tested_kernel_matrix.md](docs/tested_kernel_matrix.md)
 
 ## Problem
 
