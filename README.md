@@ -3,168 +3,408 @@
 [![License](https://img.shields.io/badge/license-GPL--2.0-blue)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/manishklach/kairo-io?display_name=tag&label=release)](https://github.com/manishklach/kairo-io/releases)
 [![Last Commit](https://img.shields.io/github/last-commit/manishklach/kairo-io)](https://github.com/manishklach/kairo-io/commits/main)
-[![Status](https://img.shields.io/badge/status-experimental-orange)](.)
+[![Status](https://img.shields.io/badge/status-RFC%2FPOC-orange)](.)
 
-Kernel AI Runtime I/O for KV-cache-aware Linux storage
+**Kernel AI Runtime I/O for KV-cache-aware Linux storage**
 
-Kairo is an internal Linux-kernel RFC/POC exploring AI KV-cache-aware block I/O for generic NVMe SSDs.
+Kairo is a Linux-kernel RFC/POC exploring a missing systems layer for AI inference: **storage I/O that understands KV-cache traffic, decode-critical reads, prefetch pressure, recomputable cache data, model/session locality, and backend placement intent.**
 
-This project is not intended for LKML submission at this stage.
+Modern AI inference is no longer just a GPU problem. Long-context models, agentic workloads, multi-session serving, KV-cache reuse, and flash-backed memory tiers are creating new storage traffic patterns that traditional block schedulers were not designed to distinguish. Today, much of this traffic still reaches the kernel as ordinary reads and writes.
 
-## License
+Kairo asks a simple question:
 
-Kairo is licensed under [GPL-2.0-only](LICENSE) to stay aligned with the
-kernel-facing patch workflow in this RFC/POC repository.
+> What if the Linux storage stack could understand AI inference I/O as a first-class workload?
 
-## Scope
+This repository explores that question through kernel patches, benchmark tooling, tracepoint scaffolding, and Linux 6.8.x integration scripts.
 
-Kairo explores whether Linux block-layer changes can improve generic NVMe SSD behavior for AI inference-like KV-cache workloads. The current proof point is decode-read prioritization under mixed read and write pressure, but the architecture remains broader than a single scheduler tweak.
+---
 
-## Current Status
+## Why Kairo Exists
 
-- internal RFC/POC
-- experimental kernel path
-- benchmark-driven validation
-- broad 9-patch RFC/POC architecture series retained under `kernel/patches/`
-- compile-targeted Linux 6.8.x foundation subset now isolated under `kernel/patches/foundation/`
-- local apply/build validation is focused on request classification, decode priority, prefetch deadlines, demotion accounting, and sysfs observability
-- implemented patch areas in the repo today: foundation request classification, decode priority, prefetch/prefill/evict policy, and sysfs observability
-- broader scaffolded architecture areas remain under `kernel/patches/` for io_uring and `RWF_*` hint plumbing, merge shaping, ephemeral/recomputable semantics, placement/lifetime hints, and generic NVMe backend mapping
-- tracked validation status for Linux `6.8.12`: foundation patch apply `yes`, foundation symbol validation `yes`, direct patched `block/mq-deadline.o` build `yes`, combined `block/blk-mq.o block/mq-deadline.o` harness `partial`, boot test `pending`, sysfs counter visibility `pending`, benchmark runs `pending`, decode counter increment check `pending`
-- additional Linux `6.8.x` validation rows remain `pending` in [docs/tested_kernel_matrix.md](docs/tested_kernel_matrix.md)
+AI inference increasingly depends on memory objects that are:
 
-## Problem
+* too large to keep entirely in HBM or DRAM,
+* too valuable to treat as cold storage,
+* latency-sensitive during decode,
+* often session-scoped or model-scoped,
+* frequently recomputable or short-lived,
+* and increasingly backed by NVMe SSDs or flash memory tiers.
 
-AI KV-cache traffic behaves differently from ordinary storage I/O:
+Traditional storage systems mostly see:
 
-- decode reads are latency-critical
-- prefetch reads are important but less urgent
-- prefill writes are background relative to decode
-- eviction and discard are lowest priority
-- KV cache is large-block, read-dominant, session scoped, and often recomputable
+```text
+read
+write
+discard
+flush
+```
+
+AI runtimes know much more:
+
+```text
+decode-critical read
+prefetch read
+prefill write
+eviction cleanup
+session-local KV cache
+model-local KV cache
+recomputable cache
+short-lived placement group
+```
+
+Kairo explores how that higher-level intent could flow into the Linux block layer and, eventually, into generic NVMe backend placement mechanisms.
+
+---
+
+## Core Idea
+
+Kairo introduces a research path for classifying and scheduling AI inference I/O:
+
+```text
+AI runtime / benchmark
+    -> hint path
+    -> request classification
+    -> mq-deadline scheduling policy
+    -> semantic and placement metadata
+    -> generic backend mapping scaffold
+    -> tracepoint observability
+```
+
+The current implementation focuses on:
+
+* decode-read prioritization under mixed read/write pressure,
+* prefetch-aware scheduling,
+* prefill-write and eviction demotion accounting,
+* model/session/cache-pool/lifetime metadata,
+* generic backend mapping scaffolds for Streams/FDP/ZNS-style placement,
+* structured benchmark experiments,
+* sysfs counters,
+* and kernel tracepoint observability scaffolding.
+
+---
+
+## Project Status
+
+Kairo is currently an **internal RFC/POC**.
+
+It is not intended for LKML submission at this stage.
+
+The repo contains two parallel tracks:
+
+### 1. Compile-targeted Linux 6.8.x foundation stack
+
+Located under:
+
+```text
+kernel/patches/foundation/
+```
+
+This is the smaller kernel-core subset intended for local Linux 6.8.x apply/build experiments.
+
+It covers:
+
+* request classification,
+* `ioprio` fallback mapping,
+* `mq-deadline` decode priority,
+* prefetch deadline handling,
+* prefill-write demotion accounting,
+* eviction/discard accounting,
+* and sysfs tunables/counters.
+
+### 2. Broader RFC/POC architecture series
+
+Located under:
+
+```text
+kernel/patches/
+```
+
+This preserves the full Kairo architecture direction, including:
+
+* request classification,
+* decode-read priority,
+* prefetch/prefill/evict scheduling,
+* request-shape and merge instrumentation,
+* `io_uring` / `RWF_*` hint plumbing,
+* ephemeral and recomputable cache semantics,
+* model/session/lifetime placement metadata,
+* generic NVMe backend mapping hooks,
+* and tracepoint observability.
+
+---
+
+## Why This Matters
+
+Kairo targets a real emerging systems problem:
+
+> AI inference workloads are beginning to use storage as an active memory tier, but the kernel still lacks AI-aware request semantics.
+
+Without richer I/O classification, the block layer cannot easily distinguish:
+
+```text
+A decode-critical KV-cache read
+from
+A background prefill write
+from
+A recomputable cache eviction
+from
+An ordinary durable application write
+```
+
+That distinction matters because decode latency can dominate perceived inference latency. If decode reads are delayed behind background writes, eviction cleanup, or poorly shaped prefetch traffic, the storage tier becomes part of the inference tail-latency problem.
+
+Kairo explores whether Linux can expose a better path.
+
+---
 
 ## Architecture
 
 ```text
-+---------------------------------------------------------+
-| AI Runtime / Synthetic Benchmark                        |
-| - decode reads                                          |
-| - prefetch reads                                        |
-| - prefill writes                                        |
-| - eviction/discard                                      |
-+---------------------------------------------------------+
-| User-Space Hint Path                                    |
-| - io_uring                                              |
-| - O_DIRECT                                              |
-| - registered buffers                                    |
-| - ioprio / model / session / lifetime hints             |
-+---------------------------------------------------------+
-| Kairo Block Layer                                       |
-| - request classification                                |
-| - decode-critical read priority                         |
-| - prefetch-aware scheduling                             |
-| - prefill-write demotion                                |
-| - large-block coalescing                                |
-+---------------------------------------------------------+
-| Generic NVMe Backend                                    |
-| - mq-deadline extensions                                |
-| - blk-mq metadata                                       |
-| - optional ZNS / Streams / FDP mapping                  |
-+---------------------------------------------------------+
++------------------------------------------------------------------+
+| AI Runtime / Synthetic Benchmark                                 |
+|                                                                  |
+|  - decode reads                                                   |
+|  - prefetch reads                                                 |
+|  - prefill writes                                                 |
+|  - eviction / discard                                             |
+|  - model, session, cache-pool, lifetime metadata                  |
++------------------------------------------------------------------+
+                         |
+                         v
++------------------------------------------------------------------+
+| User-Space Hint Path                                             |
+|                                                                  |
+|  - ioprio fallback                                                |
+|  - O_DIRECT                                                       |
+|  - io_uring / RWF_* scaffold                                      |
+|  - semantic hints: ephemeral, recomputable, avoid-pagecache       |
++------------------------------------------------------------------+
+                         |
+                         v
++------------------------------------------------------------------+
+| Kairo Block-Layer Metadata                                       |
+|                                                                  |
+|  - request classification                                         |
+|  - decode / prefetch / prefill / evict classes                    |
+|  - model_id / session_id / cache_pool_id                          |
+|  - lifetime_class / recompute_ok                                  |
+|  - backend placement intent                                       |
++------------------------------------------------------------------+
+                         |
+                         v
++------------------------------------------------------------------+
+| Kairo-Aware Scheduling                                           |
+|                                                                  |
+|  - decode-critical read priority                                  |
+|  - prefetch deadline and budget handling                          |
+|  - prefill-write demotion                                         |
+|  - eviction/discard demotion                                      |
+|  - starvation accounting                                          |
++------------------------------------------------------------------+
+                         |
+                         v
++------------------------------------------------------------------+
+| Generic NVMe Backend Mapping Scaffold                            |
+|                                                                  |
+|  - backend class mapping                                          |
+|  - no-op fallback                                                 |
+|  - Streams/FDP/ZNS-style hook locations                           |
+|  - no physical placement claimed yet                              |
++------------------------------------------------------------------+
+                         |
+                         v
++------------------------------------------------------------------+
+| Observability                                                    |
+|                                                                  |
+|  - sysfs counters                                                 |
+|  - benchmark summaries                                            |
+|  - tracepoint scaffold                                            |
+|  - bpftrace/ftrace analysis scripts                               |
++------------------------------------------------------------------+
 ```
 
-## Current Benchmark Strategy
+---
 
-The current benchmark is [bench/kairo_bench.c](bench/kairo_bench.c). It uses:
+## Kernel Patch Tracks
 
-- pthread workers
-- `pread()` and `pwrite()`
-- `O_DIRECT` when available
-- aligned buffers via `posix_memalign()`
-- per-thread `ioprio` classification
-
-Temporary worker mapping:
+### Compile-targeted foundation stack
 
 ```text
-RT prio 0 read  -> KAIRO_DECODE_READ
-RT prio 1 read  -> KAIRO_PREFETCH_READ
-BE prio 7 write -> KAIRO_PREFILL_WRITE
-discard         -> KAIRO_EVICT
+kernel/patches/foundation/
+  0001-kairo-request-classification.patch
+  0002-kairo-mq-deadline-decode-priority.patch
+  0003-kairo-prefetch-prefill-evict-policy.patch
+  0004-kairo-mq-deadline-sysfs-counters.patch
 ```
 
-## Current Kernel Patch Path
+Use this path for local Linux 6.8.x apply/build experiments.
 
-Compile-targeted foundation stack:
+### Full RFC/POC architecture series
 
-- [kernel/patches/foundation/0001-kairo-request-classification.patch](kernel/patches/foundation/0001-kairo-request-classification.patch)
-- [kernel/patches/foundation/0002-kairo-mq-deadline-decode-priority.patch](kernel/patches/foundation/0002-kairo-mq-deadline-decode-priority.patch)
-- [kernel/patches/foundation/0003-kairo-prefetch-prefill-evict-policy.patch](kernel/patches/foundation/0003-kairo-prefetch-prefill-evict-policy.patch)
-- [kernel/patches/foundation/0004-kairo-mq-deadline-sysfs-counters.patch](kernel/patches/foundation/0004-kairo-mq-deadline-sysfs-counters.patch)
+```text
+kernel/patches/
+  0001-rfc-kairo-mq-deadline-decode-priority.patch
+  0002-rfc-kairo-request-classification.patch
+  0003-rfc-kairo-io-uring-hint-plumbing.patch
+  0004-rfc-kairo-large-block-coalescing.patch
+  0005-rfc-kairo-prefetch-deadline-hints.patch
+  0006-rfc-kairo-ephemeral-cache-semantics.patch
+  0007-rfc-kairo-placement-lifetime-hints.patch
+  0008-rfc-kairo-nvme-zns-fdp-mapping.patch
+  0009-rfc-kairo-sysfs-debug-counters.patch
+  0010-rfc-kairo-tracepoints-observability.patch
+```
 
-Broader RFC/POC architecture patches:
+This broader series is the architecture map. Not every patch in this track is compile-targeted yet.
 
-Supporting scaffolds:
+---
 
-- [kernel/patches/0001-rfc-kairo-mq-deadline-decode-priority.patch](kernel/patches/0001-rfc-kairo-mq-deadline-decode-priority.patch)
-- [kernel/patches/0002-rfc-kairo-request-classification.patch](kernel/patches/0002-rfc-kairo-request-classification.patch)
-- [kernel/patches/0003-rfc-kairo-io-uring-hint-plumbing.patch](kernel/patches/0003-rfc-kairo-io-uring-hint-plumbing.patch)
-- [kernel/patches/0004-rfc-kairo-large-block-coalescing.patch](kernel/patches/0004-rfc-kairo-large-block-coalescing.patch)
-- [kernel/patches/0005-rfc-kairo-prefetch-deadline-hints.patch](kernel/patches/0005-rfc-kairo-prefetch-deadline-hints.patch)
-- [kernel/patches/0006-rfc-kairo-ephemeral-cache-semantics.patch](kernel/patches/0006-rfc-kairo-ephemeral-cache-semantics.patch)
-- [kernel/patches/0007-rfc-kairo-placement-lifetime-hints.patch](kernel/patches/0007-rfc-kairo-placement-lifetime-hints.patch)
-- [kernel/patches/0008-rfc-kairo-nvme-zns-fdp-mapping.patch](kernel/patches/0008-rfc-kairo-nvme-zns-fdp-mapping.patch)
-- [kernel/patches/0009-rfc-kairo-sysfs-debug-counters.patch](kernel/patches/0009-rfc-kairo-sysfs-debug-counters.patch)
+## Current Feature Map
 
-## Success Metric
+| Area                                  | Status                                |
+| ------------------------------------- | ------------------------------------- |
+| Request classification                | Foundation + RFC                      |
+| Decode-read prioritization            | Foundation + RFC                      |
+| Prefetch deadline policy              | Foundation + RFC                      |
+| Prefill-write demotion                | Foundation + RFC                      |
+| Eviction/discard accounting           | Foundation + RFC                      |
+| Sysfs counters                        | Foundation + RFC                      |
+| Request-shape / merge instrumentation | RFC scaffold                          |
+| `io_uring` / `RWF_*` hint plumbing    | RFC scaffold                          |
+| Ephemeral / recomputable semantics    | RFC scaffold                          |
+| Model/session/lifetime metadata       | RFC scaffold + benchmark-visible      |
+| Generic backend mapping               | RFC scaffold + benchmark-visible      |
+| NVMe Streams/FDP/ZNS hooks            | Audit scaffold, no physical placement |
+| Tracepoint observability              | RFC scaffold                          |
 
-Primary metric:
+---
 
-- `decode_p99_us` under mixed prefill-write pressure
+## Benchmark
 
-Secondary metrics:
+The benchmark lives at:
 
-- `decode_p95_us`
-- `decode_avg_us`
-- `decode_read_MBps`
-- `write_MBps`
-- starvation behavior
+```text
+bench/kairo_bench.c
+```
 
-## Build
+It models AI inference-like I/O using:
+
+* decode workers,
+* prefetch workers,
+* prefill/write workers,
+* eviction workers,
+* multi-session mode,
+* model/session/cache-pool/lifetime metadata,
+* backend-mode modeling,
+* and latency/throughput summaries.
+
+Build:
+
+```bash
+make
+```
+
+or:
 
 ```bash
 gcc -O2 -Wall -pthread -Iinclude -o kairo_bench bench/kairo_bench.c
 ```
 
-Or:
+---
 
-```bash
-./scripts/build_bench.sh
+## Temporary Hint Mapping
+
+The current foundation path uses `ioprio` as a practical local signal:
+
+```text
+RT prio 0 read   -> decode-critical read
+RT prio 1 read   -> prefetch read
+BE prio 7 write  -> prefill/background write
+discard/zeroes   -> eviction cleanup
 ```
 
-## Run Baseline
+This is intentionally temporary. The broader RFC path also explores `io_uring` and `RWF_*` hint propagation.
+
+---
+
+## Running Experiments
+
+### Baseline
 
 ```bash
 ./scripts/run_baseline.sh /mnt/nvme/kairo.test nvme0n1
 ```
 
-## Run Kairo POC
+### Kairo POC
 
 ```bash
 ./scripts/set_mq_deadline.sh nvme0n1
 ./scripts/run_kairo_poc.sh /mnt/nvme/kairo.test nvme0n1
 ```
 
-## Validation Path
-
-Use the runtime validator to confirm the experimental kernel path is live and
-that Kairo counters move under the AI inference-like KV-cache workload:
+### A/B comparison
 
 ```bash
-./scripts/validate_kairo_runtime.sh /mnt/nvme/kairo.test nvme0n1
+./scripts/run_ab_experiment.sh /mnt/nvme/kairo.test nvme0n1
 ```
 
-Use the Linux 6.8 foundation harness to apply, inspect, and build the
-compile-targeted kernel subset:
+### Multisession workload
+
+```bash
+./scripts/run_multisession_experiment.sh /mnt/nvme/kairo.test nvme0n1
+```
+
+### Stage 6 placement/lifetime experiment
+
+```bash
+./scripts/run_stage6_placement_experiment.sh /mnt/nvme/kairo.test nvme0n1
+```
+
+### Stage 7 backend mapping experiment
+
+```bash
+./scripts/run_stage7_backend_mapping_experiment.sh /mnt/nvme/kairo.test nvme0n1
+```
+
+### Stage 8 trace experiment
+
+```bash
+./scripts/run_stage8_trace_experiment.sh /mnt/nvme/kairo.test nvme0n1 --trace-mode none
+```
+
+On an unpatched kernel, trace experiments should still run and report tracepoint availability honestly.
+
+---
+
+## Success Metrics
+
+Primary metric:
+
+```text
+decode_p99_us under mixed prefill-write pressure
+```
+
+Secondary metrics:
+
+```text
+decode_p95_us
+decode_avg_us
+decode_read_MBps
+prefetch_read_MBps
+write_MBps
+eviction behavior
+starvation escapes
+backend mapping counters
+tracepoint event counts
+```
+
+The goal is not just higher throughput. The key question is whether decode-critical I/O can be protected when background AI cache traffic competes for the same storage path.
+
+---
+
+## Linux 6.8 Foundation Validation
+
+Use the Linux 6.8 integration harness:
 
 ```bash
 ./kernel/integration/linux-6.8/apply_foundation_stack.sh /path/to/linux-6.8.x
@@ -172,31 +412,113 @@ compile-targeted kernel subset:
 ./kernel/integration/linux-6.8/build_foundation_objects.sh /path/to/linux-6.8.x
 ```
 
-Use the A/B runner to compare baseline vs Kairo on the same generic NVMe SSD:
+Smoke check:
 
 ```bash
-./scripts/run_ab_experiment.sh /mnt/nvme/kairo.test nvme0n1
+./kernel/integration/linux-6.8/smoke_foundation_stack.sh /path/to/linux-6.8.x --check-only
 ```
 
-Use the multisession runner to stress model/session fan-out:
+NVMe hook audit:
 
 ```bash
-./scripts/run_multisession_experiment.sh /mnt/nvme/kairo.test nvme0n1
+./kernel/integration/linux-6.8/audit_nvme_hooks.sh /path/to/linux-6.8.x --stdout
 ```
 
-Track local validation status in:
+Tracepoint audit:
 
-- [docs/tested_kernel_matrix.md](docs/tested_kernel_matrix.md)
-- [docs/full_architecture_status.md](docs/full_architecture_status.md)
-- [docs/kernel_deep_dive_stage1_stage2.md](docs/kernel_deep_dive_stage1_stage2.md)
-- [docs/patch_series.md](docs/patch_series.md)
+```bash
+./kernel/integration/linux-6.8/audit_tracepoints.sh /path/to/linux-6.8.x --stdout
+```
+
+---
+
+## Validation Status
+
+Tracked validation lives in:
+
+* [docs/tested_kernel_matrix.md](docs/tested_kernel_matrix.md)
+* [docs/full_architecture_status.md](docs/full_architecture_status.md)
+* [docs/kernel_foundation_stack.md](docs/kernel_foundation_stack.md)
+* [docs/kernel_foundation_invariants.md](docs/kernel_foundation_invariants.md)
+
+Current status, at a high level:
+
+```text
+Foundation patch apply:       locally validated on Linux 6.8.x path
+Foundation symbol validation: locally validated
+mq-deadline object build:     locally validated
+Boot validation:              pending
+Runtime sysfs visibility:     pending
+Benchmark counter movement:   pending
+Full RFC series compile:      not claimed
+```
+
+Kairo intentionally separates what is implemented, what is scaffolded, and what is validated.
+
+---
+
+## Documentation
+
+Key docs:
+
+* [docs/architecture.md](docs/architecture.md)
+* [docs/implementation_stages.md](docs/implementation_stages.md)
+* [docs/full_architecture_status.md](docs/full_architecture_status.md)
+* [docs/patch_series.md](docs/patch_series.md)
+* [docs/kernel_foundation_stack.md](docs/kernel_foundation_stack.md)
+* [docs/kernel_foundation_invariants.md](docs/kernel_foundation_invariants.md)
+* [docs/stage6_model_session_lifetime.md](docs/stage6_model_session_lifetime.md)
+* [docs/stage7_generic_nvme_backend_mapping.md](docs/stage7_generic_nvme_backend_mapping.md)
+* [docs/stage7_5_nvme_hook_audit.md](docs/stage7_5_nvme_hook_audit.md)
+* [docs/stage8_kernel_observability.md](docs/stage8_kernel_observability.md)
+* [docs/tested_kernel_matrix.md](docs/tested_kernel_matrix.md)
+
+---
 
 ## Repository Layout
 
-- [docs/architecture.md](docs/architecture.md)
-- [docs/aggressive_poc_plan.md](docs/aggressive_poc_plan.md)
-- [docs/kernel_patch_plan.md](docs/kernel_patch_plan.md)
-- [docs/benchmark_plan.md](docs/benchmark_plan.md)
-- [include/kairo_hints.h](include/kairo_hints.h)
-- [bench/README.md](bench/README.md)
-- [scripts/build_bench.sh](scripts/build_bench.sh)
+```text
+bench/                         Synthetic KV-cache I/O benchmark
+docs/                          Architecture and validation documentation
+include/                       User-space Kairo hint definitions
+kernel/patches/                Broad RFC/POC kernel patch series
+kernel/patches/foundation/     Compile-targeted Linux 6.8.x foundation stack
+kernel/integration/linux-6.8/  Apply/build/audit helpers for Linux 6.8.x
+scripts/                       Benchmark, validation, parsing, and tracing tools
+scripts/bpftrace/              bpftrace helpers for Kairo tracepoint experiments
+```
+
+---
+
+## What Kairo Is Not
+
+Kairo is not:
+
+* a production kernel subsystem,
+* a stable userspace ABI,
+* an LKML-ready patch series,
+* a vendor-specific SSD integration,
+* or a claim of physical NVMe placement today.
+
+Kairo is a research-grade kernel/storage prototype for exploring what AI-aware Linux storage could become.
+
+---
+
+## Design Principles
+
+Kairo follows several principles:
+
+```text
+Generic before vendor-specific.
+Observable before opaque.
+Benchmark-driven before claims.
+No-op fallback before unsafe behavior.
+Foundation stack separate from architecture scaffolds.
+Explicit validation status instead of overclaiming.
+```
+
+---
+
+## License
+
+Kairo is licensed under [GPL-2.0-only](LICENSE) to stay aligned with the Linux kernel-facing patch workflow in this RFC/POC repository.
