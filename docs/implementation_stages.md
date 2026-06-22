@@ -176,14 +176,28 @@ The foundation stack currently covers Stage 1 and Stage 2 only.
 
 ## Stage 8
 
-- Broad RFC/POC patches involved: benchmark, `tools/bpf`, validation scripts
+- Broad RFC/POC patches involved: `0010`
+- Userspace header: `include/trace/events/kairo.h` (new)
+- Scripts: `scripts/run_stage8_trace_experiment.sh`,
+          `scripts/parse_stage8_trace_log.py`,
+          `scripts/bpftrace/kairo_latency.bt`,
+          `scripts/bpftrace/kairo_dispatch.bt`,
+          `scripts/bpftrace/kairo_backend.bt`
+- Audit: `kernel/integration/linux-6.8/audit_tracepoints.sh`
+- Docs: `docs/stage8_kernel_observability.md`
 - What should compile:
-  - benchmark modes
+  - tracepoint header `include/trace/events/kairo.h` (TRACE_EVENT definitions)
+  - tracepoint call sites in `block/blk-mq.c`, `block/mq-deadline.c`,
+    `block/blk-merge.c`, `drivers/nvme/host/core.c`
   - runtime validation scripts
-  - tracing helpers
+  - bpftrace scripts
 - What should be measurable:
-  - A/B decode latency
-  - multisession interference
-  - counter deltas and block-latency traces
+  - per-request lifecycle tracepoints (classification, scheduler decision,
+    dispatch, demotion, merge, semantic, placement, backend mapping)
+  - structured trace logs in `results/stage8/<timestamp>/`
+  - trace log parsing with CSV and pretty-printed summary
+  - A/B decode latency with tracepoint confirmation
 - What is still RFC-only:
-  - end-to-end proof for the full nine-patch series
+  - all tracepoints (not stable ABI)
+  - bpftrace script compatibility across kernel versions
+  - end-to-end proof for the full ten-patch series

@@ -22,6 +22,7 @@ local apply/build target for Stage 1 and Stage 2 validation.
 | `0007` | placement/lifetime | `blk-mq`, `blk_types` | model/session/lifetime metadata with helpers and synthetic defaults |
 | `0008` | NVMe mapping | `blk_types`, `blk-mq`, `drivers/nvme/host` | generic backend mapping scaffold: `enum kairo_backend_class`, `struct kairo_backend_hint`, feature-detected NVMe hooks with no-op fallback; benchmark-visible via `--backend-mode` |
 | `0009` | observability | `mq-deadline`, `debugfs` | counters proving Kairo code paths: dispatch, merge instrumentation, request-size histogram; Stage 6 placement/lifetime counters; Stage 7 backend mapping counters |
+| `0010` | tracepoints | `block/blk-mq`, `block/mq-deadline`, `block/blk-merge`, `drivers/nvme/host` | RFC/POC Kairo tracepoint scaffold: 9 TRACE_EVENT definitions in `include/trace/events/kairo.h`; conceptual call sites across block and NVMe layers; bpftrace scripts; trace experiment harness; trace log parser |
 
 ## Design Themes
 
@@ -113,6 +114,33 @@ Stage 7.5 is a hardening pass over the Stage 7 backend mapping scaffold:
 
 Stage 7.5 does not add physical placement or NVMe command programming.
 It hardens the existing scaffold and documents the hook-point landscape.
+
+## Stage 8: Kernel Observability and Tracepoints
+
+Stage 8 adds an RFC/POC tracepoint scaffolding layer for the full Kairo
+request lifecycle:
+
+- **`kernel/patches/0010`** introduces `include/trace/events/kairo.h`
+  with 9 TRACE_EVENT definitions covering classification, scheduler
+  decisions, dispatch, demotion, merge, semantic flags, placement
+  metadata, and backend mapping.
+- **Conceptual call sites** in `block/blk-mq.c`, `block/mq-deadline.c`,
+  `block/blk-merge.c`, and `drivers/nvme/host/core.c` show where each
+  tracepoint would be emitted.
+- **bpftrace scripts** (`scripts/bpftrace/kairo_*.bt`) provide
+  ready-to-use observability for dispatch latency, scheduler decisions,
+  and backend mapping outcomes.
+- **Trace experiment script** (`scripts/run_stage8_trace_experiment.sh`)
+  runs benchmarks with ftrace or bpftrace capture and saves structured
+  results under `results/stage8/<timestamp>/`.
+- **Trace log parser** (`scripts/parse_stage8_trace_log.py`) parses
+  ftrace/bpftrace logs into CSV or pretty-printed summaries.
+- **Tracepoint audit script** (`kernel/integration/linux-6.8/audit_tracepoints.sh`)
+  checks a Linux 6.8 tree for tracepoint infrastructure and Kairo
+  tracepoint symbols.
+
+Stage 8 does **not** claim stable tracing ABI, LKML readiness, or
+production instrumentation. Tracepoints are RFC/POC and may change.
 
 ## Validation Focus
 

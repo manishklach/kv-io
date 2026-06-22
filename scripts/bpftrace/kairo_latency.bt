@@ -1,0 +1,51 @@
+#!/usr/bin/env bpftrace
+/*
+ * Kairo decode/prefetch dispatch latency and byte-count observability.
+ *
+ * Requires a kernel patched with Kairo Stage 8 tracepoints.
+ * Tracepoint names are RFC/POC and may change.
+ *
+ * Usage:
+ *   bpftrace scripts/bpftrace/kairo_latency.bt
+ */
+
+BEGIN
+{
+    printf("Tracing Kairo decode/prefetch dispatch... Hit Ctrl-C to stop.\n");
+}
+
+tracepoint:kairo:kairo_decode_dispatch
+{
+    @decode_dispatches = count();
+    @decode_bytes = sum(args->nr_bytes);
+    @decode_budget = hist(args->budget_used);
+}
+
+tracepoint:kairo:kairo_prefetch_dispatch
+{
+    @prefetch_dispatches = count();
+    @prefetch_bytes = sum(args->nr_bytes);
+    @prefetch_deadline_ns = hist(args->deadline_ns);
+    @prefetch_deadline_near = count();
+    if (args->deadline_near) {
+        @prefetch_deadline_near_hits = count();
+    }
+}
+
+tracepoint:kairo:kairo_write_demoted
+{
+    @demotions_total = count();
+    @demotions_by_class[args->io_class] = count();
+    @demotions_starvation_escapes = sum(args->starvation_escape);
+}
+
+END
+{
+    printf("\n=== Kairo Dispatch Latency Summary ===\n");
+    printf("Decode dispatches:        %d\n", @decode_dispatches);
+    printf("Decode total bytes:       %d\n", @decode_bytes);
+    printf("Prefetch dispatches:      %d\n", @prefetch_dispatches);
+    printf("Prefetch total bytes:     %d\n", @prefetch_bytes);
+    printf("Demotion events:          %d\n", @demotions_total);
+    printf("Starvation escapes:       %d\n", @demotions_starvation_escapes);
+}

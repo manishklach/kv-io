@@ -23,6 +23,19 @@ verification pass:
 
 Stage 7.5 does not change foundation status or kernel compilation targets.
 
+## Patch 0010 Stage 8 Tracepoint Status
+
+Stage 8 (kernel observability and tracepoints) is an RFC/POC scaffold:
+
+- `kernel/patches/0010-rfc-kairo-tracepoints-observability.patch`
+  defines 9 tracepoints in `include/trace/events/kairo.h`
+- Conceptual call sites in block and NVMe layers (not compile-validated)
+- bpftrace scripts, experiment harness, trace parser, and audit script
+  exist as proof-of-concept tooling
+- Not foundation-integrated; requires the full Kairo patch stack for
+  tracepoint activation
+- Not LKML-ready or stable ABI
+
 ## Patch 0008/0009 Stage 7 Mapping Status
 
 Stage 7 (`0008`, `0009`) adds a generic backend mapping scaffold with

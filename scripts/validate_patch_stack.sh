@@ -22,6 +22,7 @@ required_broad_patches=(
   "0007-rfc-kairo-placement-lifetime-hints.patch"
   "0008-rfc-kairo-nvme-zns-fdp-mapping.patch"
   "0009-rfc-kairo-sysfs-debug-counters.patch"
+  "0010-rfc-kairo-tracepoints-observability.patch"
 )
 
 required_foundation_patches=(
@@ -261,6 +262,54 @@ stage7_has_pattern "$KB" "backend_mode="
 stage7_has_pattern "$KB" "backend_class="
 stage7_has_pattern "$DOC7" "backend class"
 stage7_has_pattern "$DOC7" "KAIRO_BACKEND_NONE"
+
+# Stage 8: verify tracepoint patch and scripts
+stage8_has_pattern() {
+  local file="$1" pattern="$2"
+  grep -qF -- "$pattern" "$file" || fail "Stage 8: missing pattern '$pattern' in $(basename "$file")"
+}
+
+stage8_file_exists() {
+  [[ -f "$1" ]] || fail "Stage 8: missing file: $1"
+}
+
+P10="$PATCH_DIR/0010-rfc-kairo-tracepoints-observability.patch"
+DOC8="$REPO_ROOT/docs/stage8_kernel_observability.md"
+R8SE="$REPO_ROOT/scripts/run_stage8_trace_experiment.sh"
+P8SP="$REPO_ROOT/scripts/parse_stage8_trace_log.py"
+AUDIT_TP="$REPO_ROOT/kernel/integration/linux-6.8/audit_tracepoints.sh"
+BT_LATENCY="$REPO_ROOT/scripts/bpftrace/kairo_latency.bt"
+BT_DISPATCH="$REPO_ROOT/scripts/bpftrace/kairo_dispatch.bt"
+BT_BACKEND="$REPO_ROOT/scripts/bpftrace/kairo_backend.bt"
+
+stage8_file_exists "$P10"
+stage8_file_exists "$DOC8"
+stage8_file_exists "$R8SE"
+stage8_file_exists "$P8SP"
+stage8_file_exists "$AUDIT_TP"
+stage8_file_exists "$BT_LATENCY"
+stage8_file_exists "$BT_DISPATCH"
+stage8_file_exists "$BT_BACKEND"
+stage8_has_pattern "$P10" "TRACE_SYSTEM kairo"
+stage8_has_pattern "$P10" "TRACE_EVENT(kairo_request_classified"
+stage8_has_pattern "$P10" "TRACE_EVENT(kairo_scheduler_decision"
+stage8_has_pattern "$P10" "TRACE_EVENT(kairo_decode_dispatch"
+stage8_has_pattern "$P10" "TRACE_EVENT(kairo_prefetch_dispatch"
+stage8_has_pattern "$P10" "TRACE_EVENT(kairo_write_demoted"
+stage8_has_pattern "$P10" "TRACE_EVENT(kairo_merge_decision"
+stage8_has_pattern "$P10" "TRACE_EVENT(kairo_semantic_classified"
+stage8_has_pattern "$P10" "TRACE_EVENT(kairo_placement_classified"
+stage8_has_pattern "$P10" "TRACE_EVENT(kairo_backend_mapped"
+stage8_has_pattern "$DOC8" "tracepoints"
+stage8_has_pattern "$R8SE" "results/stage8"
+stage8_has_pattern "$R8SE" "trace-mode"
+stage8_has_pattern "$R8SE" "bpftrace"
+stage8_has_pattern "$P8SP" "--csv"
+stage8_has_pattern "$P8SP" "--pretty"
+stage8_has_pattern "$AUDIT_TP" "kairo_request_classified"
+stage8_has_pattern "$BT_LATENCY" "kairo_decode_dispatch"
+stage8_has_pattern "$BT_DISPATCH" "kairo_scheduler_decision"
+stage8_has_pattern "$BT_BACKEND" "kairo_backend_mapped"
 
 required_sysfs_names=(
   "kairo_enable"

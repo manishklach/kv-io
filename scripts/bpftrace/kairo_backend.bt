@@ -1,0 +1,45 @@
+#!/usr/bin/env bpftrace
+/*
+ * Kairo Stage 7 backend mapping outcome observability.
+ *
+ * Requires a kernel patched with Kairo Stage 8 tracepoints.
+ * Tracepoint names are RFC/POC and may change.
+ *
+ * Usage:
+ *   bpftrace scripts/bpftrace/kairo_backend.bt
+ */
+
+BEGIN
+{
+    printf("Tracing Kairo backend mapping... Hit Ctrl-C to stop.\n");
+}
+
+tracepoint:kairo:kairo_backend_mapped
+{
+    @backend_by_class[args->backend_class, args->noop_fallback] = count();
+    @backend_total = count();
+    @backend_stream_hints = sum(args->stream_id);
+    @backend_fdp_hints = sum(args->fdp_placement_id);
+    @backend_zone_hints = sum(args->zone_hint);
+    @backend_noop_count = count();
+    if (args->noop_fallback == 1) {
+        @backend_noop_actual = count();
+    }
+}
+
+tracepoint:kairo:kairo_placement_classified
+{
+    @placement_by_lifetime[args->lifetime_class] = count();
+    @placement_by_model[args->model_id] = count();
+}
+
+END
+{
+    printf("\n=== Kairo Backend Mapping Summary ===\n");
+    printf("Total backend mappings:     %d\n", @backend_total);
+    printf("No-op fallback count:       %d\n", @backend_noop_actual);
+    printf("Stream hint sum:            %d\n", @backend_stream_hints);
+    printf("FDP hint sum:               %d\n", @backend_fdp_hints);
+    printf("Zone hint sum:              %d\n", @backend_zone_hints);
+    printf("\nBackend mappings by (backend_class, noop_fallback):\n");
+}

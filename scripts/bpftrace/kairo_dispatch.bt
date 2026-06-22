@@ -1,0 +1,45 @@
+#!/usr/bin/env bpftrace
+/*
+ * Kairo scheduler decision and dispatch observability by I/O class.
+ *
+ * Requires a kernel patched with Kairo Stage 8 tracepoints.
+ * Tracepoint names are RFC/POC and may change.
+ *
+ * Usage:
+ *   bpftrace scripts/bpftrace/kairo_dispatch.bt
+ */
+
+BEGIN
+{
+    printf("Tracing Kairo scheduler decisions... Hit Ctrl-C to stop.\n");
+}
+
+tracepoint:kairo:kairo_scheduler_decision
+{
+    @decisions[args->io_class, args->decision, args->reason] = count();
+    @decisions_total = count();
+}
+
+tracepoint:kairo:kairo_decode_dispatch
+{
+    @decode[args->dev] = count();
+    @decode_bytes_total = sum(args->nr_bytes);
+}
+
+tracepoint:kairo:kairo_prefetch_dispatch
+{
+    @prefetch[args->dev] = count();
+    @prefetch_bytes_total = sum(args->nr_bytes);
+}
+
+tracepoint:kairo:kairo_request_classified
+{
+    @classified[args->io_class, args->hint_source] = count();
+}
+
+END
+{
+    printf("\n=== Kairo Dispatch Summary ===\n");
+    printf("Total scheduler decisions: %d\n", @decisions_total);
+    printf("\nDecisions by (io_class, decision, reason):\n");
+}

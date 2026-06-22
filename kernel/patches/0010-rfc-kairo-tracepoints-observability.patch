@@ -1,0 +1,701 @@
+From 1010101010100000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kairo POC <kairo-poc@local>
+Date: Sun, 21 Jun 2026 22:00:00 -0700
+Subject: [RFC/POC PATCH 10/9] Kairo kernel tracepoint observability scaffold
+
+RFC/POC ONLY:
+This patch adds Kairo tracepoint scaffolding for request lifecycle
+observability. Tracepoint names and payloads are not stable ABI.
+The goal is local kernel research and benchmark validation.
+
+Subsystem touched:
+- `include/trace/events/kairo.h` (new)
+- `block/blk-mq.c`
+- `block/mq-deadline.c`
+- `block/blk-merge.c`
+- `drivers/nvme/host/core.c`
+- `include/linux/blk-mq.h`
+- `include/linux/blk_types.h`
+
+Kairo concept:
+- tracepoints for each request lifecycle stage: classification, scheduler
+  decision, dispatch, demotion, merge, semantic flags, placement metadata,
+  backend mapping
+- RFC/POC tracepoint definitions only; no stable tracing ABI
+- scripts/bpftrace/ scripts for analysis with patched kernel
+
+Stage 8 relation:
+- connects Stage 1 (classification) through Stage 7 (backend mapping)
+  into a unified tracepoint layer
+- tracepoints match benchmark output fields for cross-validation
+
+Still to validate:
+- whether tracepoint overhead is acceptable in the hot dispatch path
+- whether all tracepoints produce useful signal for kernel developers
+- whether bpftrace scripts correctly parse tracepoint output
+
+diff --git a/include/trace/events/kairo.h b/include/trace/events/kairo.h
+new file mode 100644
+index 0000000..e69de29
+--- /dev/null
++++ b/include/trace/events/kairo.h
+@@ -0,0 +1,350 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * RFC/POC: Kairo tracepoint definitions.
++ *
++ * These tracepoints instrument the Kairo request lifecycle for kernel
++ * observability via ftrace, perf, or bpftrace.
++ *
++ * COMPILE-RISK: MEDIUM. The TRACE_EVENT macros follow standard kernel
++ * conventions. However, the exact payload structs and field types may
++ * need adjustment for the target kernel version (Linux 6.8.x).
++ *
++ * Not stable ABI. For local kernel research only.
++ */
++
++#undef TRACE_SYSTEM
++#define TRACE_SYSTEM kairo
++
++#if !defined(_TRACE_KAIRO_H) || defined(TRACE_HEADER_MULTI_READ)
++#define _TRACE_KAIRO_H
++
++#include <linux/tracepoint.h>
++#include <linux/types.h>
++
++/*
++ * Helper enums for tracepoint payload fields.
++ *
++ * These mirror Kairo internal classification values.
++ * They are defined here so trace output is self-describing.
++ */
++
++/* kairo_io_class matches enum kairo_io_class from blk_types.h */
++#define KAIRO_TRACE_IO_NONE		0
++#define KAIRO_TRACE_IO_DECODE_READ	1
++#define KAIRO_TRACE_IO_PREFETCH_READ	2
++#define KAIRO_TRACE_IO_PREFILL_WRITE	3
++#define KAIRO_TRACE_IO_EVICT		4
++#define KAIRO_TRACE_IO_NORMAL		5
++
++/* kairo_hint_source matches hint source in request metadata */
++#define KAIRO_TRACE_HINT_NONE		0
++#define KAIRO_TRACE_HINT_IOPRIO		1
++#define KAIRO_TRACE_HINT_RWF		2
++#define KAIRO_TRACE_HINT_BOTH		3
++
++/* kairo_scheduler_decision values */
++#define KAIRO_TRACE_DECISION_DISPATCH		0
++#define KAIRO_TRACE_DECISION_DEMOTE_PREFILL	1
++#define KAIRO_TRACE_DECISION_DEMOTE_EVICT	2
++#define KAIRO_TRACE_DECISION_BYPASS		3
++#define KAIRO_TRACE_DECISION_NORMAL		4
++
++/* kairo_backend_class matches enum kairo_backend_class */
++#define KAIRO_TRACE_BACKEND_NONE		0
++#define KAIRO_TRACE_BACKEND_SHORT_LIVED		1
++#define KAIRO_TRACE_BACKEND_SESSION_LOCAL	2
++#define KAIRO_TRACE_BACKEND_MODEL_LOCAL		3
++#define KAIRO_TRACE_BACKEND_RECOMPUTABLE	4
++#define KAIRO_TRACE_BACKEND_PERSISTENT		5
++
++/*
++ * Tracepoint: kairo_request_classified
++ *
++ * Emitted when Kairo classifies a request at the blk-mq layer.
++ * CONCEPTUAL-HOOK: placement depends on where kairo_classify_rq() is
++ * called and whether the request has valid metadata at that point.
++ */
++TRACE_EVENT(kairo_request_classified,
++	TP_PROTO(unsigned int dev, sector_t sector, unsigned int nr_bytes,
++		 unsigned int op, unsigned int ioprio,
++		 unsigned int io_class, unsigned int hint_source,
++		 unsigned int flags),
++
++	TP_ARGS(dev, sector, nr_bytes, op, ioprio, io_class, hint_source,
++		flags),
++
++	TP_STRUCT__entry(
++		__field(unsigned int, dev)
++		__field(sector_t, sector)
++		__field(unsigned int, nr_bytes)
++		__field(unsigned int, op)
++		__field(unsigned int, ioprio)
++		__field(unsigned int, io_class)
++		__field(unsigned int, hint_source)
++		__field(unsigned int, flags)
++	),
++
++	TP_fast_assign(
++		__entry->dev		= dev;
++		__entry->sector		= sector;
++		__entry->nr_bytes	= nr_bytes;
++		__entry->op		= op;
++		__entry->ioprio		= ioprio;
++		__entry->io_class	= io_class;
++		__entry->hint_source	= hint_source;
++		__entry->flags		= flags;
++	),
++
++	TP_printk("dev=%u sector=%llu nr_bytes=%u op=%u ioprio=%u "
++		  "io_class=%u hint_source=%u flags=%u",
++		  __entry->dev, (unsigned long long)__entry->sector,
++		  __entry->nr_bytes, __entry->op, __entry->ioprio,
++		  __entry->io_class, __entry->hint_source, __entry->flags)
++);
++
++/*
++ * Tracepoint: kairo_scheduler_decision
++ *
++ * Emitted when mq-deadline makes a Kairo-aware scheduling decision.
++ * CONCEPTUAL-HOOK: exact call sites depend on mq-deadline internal
++ * dispatch helpers.
++ */
++TRACE_EVENT(kairo_scheduler_decision,
++	TP_PROTO(unsigned int dev, sector_t sector, unsigned int nr_bytes,
++		 unsigned int io_class, unsigned int decision,
++		 unsigned int reason, unsigned int budget_used,
++		 unsigned long long deadline_ns),
++
++	TP_ARGS(dev, sector, nr_bytes, io_class, decision, reason,
++		budget_used, deadline_ns),
++
++	TP_STRUCT__entry(
++		__field(unsigned int, dev)
++		__field(sector_t, sector)
++		__field(unsigned int, nr_bytes)
++		__field(unsigned int, io_class)
++		__field(unsigned int, decision)
++		__field(unsigned int, reason)
++		__field(unsigned int, budget_used)
++		__field(unsigned long long, deadline_ns)
++	),
++
++	TP_fast_assign(
++		__entry->dev		= dev;
++		__entry->sector		= sector;
++		__entry->nr_bytes	= nr_bytes;
++		__entry->io_class	= io_class;
++		__entry->decision	= decision;
++		__entry->reason		= reason;
++		__entry->budget_used	= budget_used;
++		__entry->deadline_ns	= deadline_ns;
++	),
++
++	TP_printk("dev=%u sector=%llu nr_bytes=%u io_class=%u "
++		  "decision=%u reason=%u budget=%u deadline_ns=%llu",
++		  __entry->dev, (unsigned long long)__entry->sector,
++		  __entry->nr_bytes, __entry->io_class, __entry->decision,
++		  __entry->reason, __entry->budget_used,
++		  (unsigned long long)__entry->deadline_ns)
++);
++
++/*
++ * Tracepoint: kairo_decode_dispatch
++ *
++ * Emitted when a decode-critical read is dispatched.
++ * COMPILE-TARGET: call site in dd_kairo_dispatch_decode_request() or
++ * equivalent mq-deadline decode dispatch helper.
++ */
++TRACE_EVENT(kairo_decode_dispatch,
++	TP_PROTO(unsigned int dev, sector_t sector, unsigned int nr_bytes,
++		 unsigned int budget_used, unsigned long long latency_hint_ns),
++
++	TP_ARGS(dev, sector, nr_bytes, budget_used, latency_hint_ns),
++
++	TP_STRUCT__entry(
++		__field(unsigned int, dev)
++		__field(sector_t, sector)
++		__field(unsigned int, nr_bytes)
++		__field(unsigned int, budget_used)
++		__field(unsigned long long, latency_hint_ns)
++	),
++
++	TP_fast_assign(
++		__entry->dev		= dev;
++		__entry->sector		= sector;
++		__entry->nr_bytes	= nr_bytes;
++		__entry->budget_used	= budget_used;
++		__entry->latency_hint_ns = latency_hint_ns;
++	),
++
++	TP_printk("dev=%u sector=%llu nr_bytes=%u budget=%u "
++		  "latency_hint_ns=%llu",
++		  __entry->dev, (unsigned long long)__entry->sector,
++		  __entry->nr_bytes, __entry->budget_used,
++		  (unsigned long long)__entry->latency_hint_ns)
++);
++
++/*
++ * Tracepoint: kairo_prefetch_dispatch
++ *
++ * Emitted when a prefetch read is dispatched.
++ * COMPILE-TARGET: call site in dd_kairo_dispatch_prefetch_request().
++ */
++TRACE_EVENT(kairo_prefetch_dispatch,
++	TP_PROTO(unsigned int dev, sector_t sector, unsigned int nr_bytes,
++		 unsigned int budget_used, unsigned long long deadline_ns,
++		 unsigned int deadline_near),
++
++	TP_ARGS(dev, sector, nr_bytes, budget_used, deadline_ns,
++		deadline_near),
++
++	TP_STRUCT__entry(
++		__field(unsigned int, dev)
++		__field(sector_t, sector)
++		__field(unsigned int, nr_bytes)
++		__field(unsigned int, budget_used)
++		__field(unsigned long long, deadline_ns)
++		__field(unsigned int, deadline_near)
++	),
++
++	TP_fast_assign(
++		__entry->dev		= dev;
++		__entry->sector		= sector;
++		__entry->nr_bytes	= nr_bytes;
++		__entry->budget_used	= budget_used;
++		__entry->deadline_ns	= deadline_ns;
++		__entry->deadline_near	= deadline_near;
++	),
++
++	TP_printk("dev=%u sector=%llu nr_bytes=%u budget=%u "
++		  "deadline_ns=%llu deadline_near=%u",
++		  __entry->dev, (unsigned long long)__entry->sector,
++		  __entry->nr_bytes, __entry->budget_used,
++		  (unsigned long long)__entry->deadline_ns,
++		  __entry->deadline_near)
++);
++
++/*
++ * Tracepoint: kairo_write_demoted
++ *
++ * Emitted when prefill or evict work is demoted behind decode/prefetch.
++ * COMPILE-TARGET: call sites in dd_kairo_should_demote_prefill() and
++ * dd_kairo_should_demote_evict().
++ */
++TRACE_EVENT(kairo_write_demoted,
++	TP_PROTO(unsigned int dev, sector_t sector, unsigned int nr_bytes,
++		 unsigned int io_class, unsigned int reason,
++		 unsigned int starvation_escape),
++
++	TP_ARGS(dev, sector, nr_bytes, io_class, reason, starvation_escape),
++
++	TP_STRUCT__entry(
++		__field(unsigned int, dev)
++		__field(sector_t, sector)
++		__field(unsigned int, nr_bytes)
++		__field(unsigned int, io_class)
++		__field(unsigned int, reason)
++		__field(unsigned int, starvation_escape)
++	),
++
++	TP_fast_assign(
++		__entry->dev		= dev;
++		__entry->sector		= sector;
++		__entry->nr_bytes	= nr_bytes;
++		__entry->io_class	= io_class;
++		__entry->reason		= reason;
++		__entry->starvation_escape = starvation_escape;
++	),
++
++	TP_printk("dev=%u sector=%llu nr_bytes=%u io_class=%u "
++		  "reason=%u starvation_escape=%u",
++		  __entry->dev, (unsigned long long)__entry->sector,
++		  __entry->nr_bytes, __entry->io_class, __entry->reason,
++		  __entry->starvation_escape)
++);
++
++/*
++ * Tracepoint: kairo_merge_decision
++ *
++ * Emitted when Kairo merge/coalescing policy observes or biases a
++ * merge decision.
++ * CONCEPTUAL-HOOK: call site depends on exact merge instrumentation
++ * from Stage 3 (0004 patch).
++ */
++TRACE_EVENT(kairo_merge_decision,
++	TP_PROTO(unsigned int dev, sector_t sector, unsigned int nr_bytes,
++		 unsigned int io_class, unsigned int merge_attempted,
++		 unsigned int merge_success, unsigned int reason),
++
++	TP_ARGS(dev, sector, nr_bytes, io_class, merge_attempted,
++		merge_success, reason),
++
++	TP_STRUCT__entry(
++		__field(unsigned int, dev)
++		__field(sector_t, sector)
++		__field(unsigned int, nr_bytes)
++		__field(unsigned int, io_class)
++		__field(unsigned int, merge_attempted)
++		__field(unsigned int, merge_success)
++		__field(unsigned int, reason)
++	),
++
++	TP_fast_assign(
++		__entry->dev		= dev;
++		__entry->sector		= sector;
++		__entry->nr_bytes	= nr_bytes;
++		__entry->io_class	= io_class;
++		__entry->merge_attempted = merge_attempted;
++		__entry->merge_success	= merge_success;
++		__entry->reason		= reason;
++	),
++
++	TP_printk("dev=%u sector=%llu nr_bytes=%u io_class=%u "
++		  "merge_attempted=%u merge_success=%u reason=%u",
++		  __entry->dev, (unsigned long long)__entry->sector,
++		  __entry->nr_bytes, __entry->io_class,
++		  __entry->merge_attempted, __entry->merge_success,
++		  __entry->reason)
++);
++
++/*
++ * Tracepoint: kairo_semantic_classified
++ *
++ * Emitted when Stage 5 semantic flags are visible on a request.
++ * CONCEPTUAL-HOOK: semantic flags exist in kairo_hints but may not
++ * be populated in all request paths.
++ */
++TRACE_EVENT(kairo_semantic_classified,
++	TP_PROTO(unsigned int dev, sector_t sector, unsigned int nr_bytes,
++		 unsigned int ephemeral, unsigned int recomputable,
++		 unsigned int avoid_pagecache, unsigned int no_strong_durability),
++
++	TP_ARGS(dev, sector, nr_bytes, ephemeral, recomputable,
++		avoid_pagecache, no_strong_durability),
++
++	TP_STRUCT__entry(
++		__field(unsigned int, dev)
++		__field(sector_t, sector)
++		__field(unsigned int, nr_bytes)
++		__field(unsigned int, ephemeral)
++		__field(unsigned int, recomputable)
++		__field(unsigned int, avoid_pagecache)
++		__field(unsigned int, no_strong_durability)
++	),
++
++	TP_fast_assign(
++		__entry->dev			= dev;
++		__entry->sector			= sector;
++		__entry->nr_bytes		= nr_bytes;
++		__entry->ephemeral		= ephemeral;
++		__entry->recomputable		= recomputable;
++		__entry->avoid_pagecache	= avoid_pagecache;
++		__entry->no_strong_durability	= no_strong_durability;
++	),
++
++	TP_printk("dev=%u sector=%llu nr_bytes=%u ephemeral=%u "
++		  "recomputable=%u avoid_pagecache=%u no_durability=%u",
++		  __entry->dev, (unsigned long long)__entry->sector,
++		  __entry->nr_bytes, __entry->ephemeral,
++		  __entry->recomputable, __entry->avoid_pagecache,
++		  __entry->no_strong_durability)
++);
++
++/*
++ * Tracepoint: kairo_placement_classified
++ *
++ * Emitted when Stage 6 placement/lifetime metadata is present.
++ * COMPILE-TARGET: metadata fields are populated by blk_mq_kairo_default_placement()
++ * in the 0007 patch.
++ */
++TRACE_EVENT(kairo_placement_classified,
++	TP_PROTO(unsigned int dev, sector_t sector, unsigned int nr_bytes,
++		 unsigned int model_id, unsigned int session_id,
++		 unsigned int cache_pool_id, unsigned int placement_group,
++		 unsigned int lifetime_class, unsigned int recompute_ok),
++
++	TP_ARGS(dev, sector, nr_bytes, model_id, session_id, cache_pool_id,
++		placement_group, lifetime_class, recompute_ok),
++
++	TP_STRUCT__entry(
++		__field(unsigned int, dev)
++		__field(sector_t, sector)
++		__field(unsigned int, nr_bytes)
++		__field(unsigned int, model_id)
++		__field(unsigned int, session_id)
++		__field(unsigned int, cache_pool_id)
++		__field(unsigned int, placement_group)
++		__field(unsigned int, lifetime_class)
++		__field(unsigned int, recompute_ok)
++	),
++
++	TP_fast_assign(
++		__entry->dev		= dev;
++		__entry->sector		= sector;
++		__entry->nr_bytes	= nr_bytes;
++		__entry->model_id	= model_id;
++		__entry->session_id	= session_id;
++		__entry->cache_pool_id	= cache_pool_id;
++		__entry->placement_group = placement_group;
++		__entry->lifetime_class	= lifetime_class;
++		__entry->recompute_ok	= recompute_ok;
++	),
++
++	TP_printk("dev=%u sector=%llu nr_bytes=%u model=%u session=%u "
++		  "cache_pool=%u placement_group=%u lifetime=%u "
++		  "recompute_ok=%u",
++		  __entry->dev, (unsigned long long)__entry->sector,
++		  __entry->nr_bytes, __entry->model_id, __entry->session_id,
++		  __entry->cache_pool_id, __entry->placement_group,
++		  __entry->lifetime_class, __entry->recompute_ok)
++);
++
++/*
++ * Tracepoint: kairo_backend_mapped
++ *
++ * Emitted when Stage 7 backend mapping produces a generic backend hint.
++ * COMPILE-TARGET: call site in nvme_kairo_prepare_backend_hint() or
++ * kairo_backend_hint_apply_caps().
++ */
++TRACE_EVENT(kairo_backend_mapped,
++	TP_PROTO(unsigned int dev, sector_t sector, unsigned int nr_bytes,
++		 unsigned int backend_class, unsigned int stream_id,
++		 unsigned int fdp_placement_id, unsigned int zone_hint,
++		 unsigned int noop_fallback, unsigned int flags),
++
++	TP_ARGS(dev, sector, nr_bytes, backend_class, stream_id,
++		fdp_placement_id, zone_hint, noop_fallback, flags),
++
++	TP_STRUCT__entry(
++		__field(unsigned int, dev)
++		__field(sector_t, sector)
++		__field(unsigned int, nr_bytes)
++		__field(unsigned int, backend_class)
++		__field(unsigned int, stream_id)
++		__field(unsigned int, fdp_placement_id)
++		__field(unsigned int, zone_hint)
++		__field(unsigned int, noop_fallback)
++		__field(unsigned int, flags)
++	),
++
++	TP_fast_assign(
++		__entry->dev		= dev;
++		__entry->sector		= sector;
++		__entry->nr_bytes	= nr_bytes;
++		__entry->backend_class	= backend_class;
++		__entry->stream_id	= stream_id;
++		__entry->fdp_placement_id = fdp_placement_id;
++		__entry->zone_hint	= zone_hint;
++		__entry->noop_fallback	= noop_fallback;
++		__entry->flags		= flags;
++	),
++
++	TP_printk("dev=%u sector=%llu nr_bytes=%u backend_class=%u "
++		  "stream_id=%u fdp_placement_id=%u zone_hint=%u "
++		  "noop_fallback=%u flags=%u",
++		  __entry->dev, (unsigned long long)__entry->sector,
++		  __entry->nr_bytes, __entry->backend_class,
++		  __entry->stream_id, __entry->fdp_placement_id,
++		  __entry->zone_hint, __entry->noop_fallback,
++		  __entry->flags)
++);
++
++#endif /* _TRACE_KAIRO_H */
++
++/* RFC/POC: define_trace.h must be included last */
++#include <trace/define_trace.h>
+diff --git a/include/linux/blk_types.h b/include/linux/blk_types.h
+index f190ccd..d20ef19 100644
+--- a/include/linux/blk_types.h
++++ b/include/linux/blk_types.h
+@@ -XXX,6 +XXX,XXX @@
++/*
++ * Stage 8: Kairo trace enum comments for tracepoint payload self-description.
++ *
++ * These integer ranges are documented for trace consumers.
++ * They are not new enums — they reference existing Kairo internal values.
++ *
++ * kairo_io_class:      0=NONE 1=DECODE_READ 2=PREFETCH_READ
++ *                      3=PREFILL_WRITE 4=EVICT 5=NORMAL
++ * kairo_hint_source:   0=NONE 1=IOPRIO 2=RWF 3=BOTH
++ * kairo_backend_class: 0=NONE 1=SHORT_LIVED 2=SESSION_LOCAL
++ *                      3=MODEL_LOCAL 4=RECOMPUTABLE 5=PERSISTENT
++ */
+diff --git a/block/blk-mq.c b/block/blk-mq.c
+index 77ca638..a13b9e0 100644
+--- a/block/blk-mq.c
++++ b/block/blk-mq.c
+@@ -XXX,6 +XXX,XXX @@
++#include <trace/events/kairo.h>
++
++/*
++ * CONCEPTUAL-HOOK: trace_kairo_request_classified() call site.
++ *
++ * This should be placed near kairo_classify_rq() or equivalent
++ * classification point where the request has valid sector/bytes/op metadata
++ * and the classified io_class is known.
++ *
++ * VERSION-SENSITIVE: exact placement depends on where
++ * blk_mq_kairo_init_request() and rq_set_kairo_from_bio() are called
++ * in the target kernel version.
++ */
++static void kairo_trace_classify(struct request *rq, unsigned int io_class,
++				 unsigned int hint_source)
++{
++	trace_kairo_request_classified(
++		rq->q->sysfs_dev->devt, blk_rq_pos(rq), blk_rq_bytes(rq),
++		rq->cmd_flags, rq->ioprio, io_class, hint_source,
++		rq->kairo_hints.flags);
++}
+diff --git a/block/mq-deadline.c b/block/mq-deadline.c
+index 2d26bef..48fe5f9 100755
+--- a/block/mq-deadline.c
++++ b/block/mq-deadline.c
+@@ -XXX,6 +XXX,XXX @@
++#include <trace/events/kairo.h>
++
++/*
++ * CONCEPTUAL-HOOK: trace_kairo_scheduler_decision() call sites.
++ *
++ * These should be placed at the dispatch decision points in
++ * dd_kairo_dispatch_decode_request(), dd_kairo_dispatch_prefetch_request(),
++ * dd_kairo_should_demote_prefill(), dd_kairo_should_demote_evict(), and
++ * dd_dispatch_request().
++ *
++ * COMPILE-TARGET: individual tracepoint calls.
++ */
++
++/*
++ * Decode dispatch trace.
++ * Place inside dd_kairo_dispatch_decode_request() after request is selected.
++ */
++static void kairo_trace_decode_dispatch(struct request *rq,
++					unsigned int budget_used)
++{
++	trace_kairo_decode_dispatch(
++		rq->q->sysfs_dev->devt, blk_rq_pos(rq), blk_rq_bytes(rq),
++		budget_used, rq->kairo_hints.kairo_deadline_ns);
++}
++
++/*
++ * Prefetch dispatch trace.
++ * Place inside dd_kairo_dispatch_prefetch_request() after request is selected.
++ */
++static void kairo_trace_prefetch_dispatch(struct request *rq,
++					  unsigned int budget_used,
++					  unsigned int deadline_near)
++{
++	trace_kairo_prefetch_dispatch(
++		rq->q->sysfs_dev->devt, blk_rq_pos(rq), blk_rq_bytes(rq),
++		budget_used, rq->kairo_hints.kairo_deadline_ns, deadline_near);
++}
++
++/*
++ * Demotion trace.
++ * Place inside dd_kairo_should_demote_prefill() / dd_kairo_should_demote_evict()
++ * when demotion decision is made.
++ */
++static void kairo_trace_demote(struct request *rq, unsigned int reason,
++			       unsigned int starvation_escape)
++{
++	trace_kairo_write_demoted(
++		rq->q->sysfs_dev->devt, blk_rq_pos(rq), blk_rq_bytes(rq),
++		rq->kairo_hints.io_class, reason, starvation_escape);
++}
++
++/*
++ * Scheduler decision trace.
++ * Place in dd_dispatch_request() when a Kairo-aware decision is made.
++ */
++static void kairo_trace_scheduler_decision(struct request *rq,
++					   unsigned int decision,
++					   unsigned int reason)
++{
++	trace_kairo_scheduler_decision(
++		rq->q->sysfs_dev->devt, blk_rq_pos(rq), blk_rq_bytes(rq),
++		rq->kairo_hints.io_class, decision, reason,
++		0, rq->kairo_hints.kairo_deadline_ns);
++}
+diff --git a/block/blk-merge.c b/block/blk-merge.c
+index 6d8cd3a..bda6fd3 100644
+--- a/block/blk-merge.c
++++ b/block/blk-merge.c
+@@ -XXX,6 +XXX,XXX @@
++#include <trace/events/kairo.h>
++
++/*
++ * CONCEPTUAL-HOOK: trace_kairo_merge_decision() call sites.
++ *
++ * Place near kairo_should_bias_merge() and kairo_merge_within_limits()
++ * to trace merge observations and decisions.
++ *
++ * VERSION-SENSITIVE: exact placement depends on merge instrumentation
++ * from Stage 3 (0004 patch) which is itself conceptual.
++ */
++static void kairo_trace_merge(struct request *rq, unsigned int io_class,
++			      unsigned int attempted, unsigned int success,
++			      unsigned int reason)
++{
++	trace_kairo_merge_decision(
++		rq->q->sysfs_dev->devt, blk_rq_pos(rq), blk_rq_bytes(rq),
++		io_class, attempted, success, reason);
++}
+diff --git a/block/blk-mq.c b/block/blk-mq.c
+index a13b9e0..f7c3d2b 100644
+--- a/block/blk-mq.c
++++ b/block/blk-mq.c
+@@ -XXX,6 +XXX,XXX @@
++/*
++ * CONCEPTUAL-HOOK: trace_kairo_semantic_classified() call site.
++ *
++ * Place where Stage 5 semantic flags (ephemeral, recomputable,
++ * avoid_pagecache, no_strong_durability) are available on the request.
++ *
++ * If semantic flags are not yet populated in the request path, this
++ * trace point remains dead code until Stage 5 metadata plumbing is
++ * completed.
++ */
++static void kairo_trace_semantic(struct request *rq)
++{
++	trace_kairo_semantic_classified(
++		rq->q->sysfs_dev->devt, blk_rq_pos(rq), blk_rq_bytes(rq),
++		rq->kairo_hints.semantic.ephemeral,
++		rq->kairo_hints.semantic.recomputable,
++		rq->kairo_hints.semantic.avoid_pagecache,
++		rq->kairo_hints.semantic.no_strong_durability);
++}
++
++/*
++ * COMPILE-TARGET: trace_kairo_placement_classified() call site.
++ *
++ * Place where Stage 6 placement/lifetime metadata is populated,
++ * such as after blk_mq_kairo_default_placement().
++ */
++static void kairo_trace_placement(struct request *rq)
++{
++	trace_kairo_placement_classified(
++		rq->q->sysfs_dev->devt, blk_rq_pos(rq), blk_rq_bytes(rq),
++		rq->kairo_hints.placement.model_id,
++		rq->kairo_hints.placement.session_id,
++		rq->kairo_hints.placement.cache_pool_id,
++		rq->kairo_hints.placement.placement_group,
++		rq->kairo_hints.placement.lifetime_class,
++		rq->kairo_hints.placement.recompute_ok);
++}
+diff --git a/drivers/nvme/host/core.c b/drivers/nvme/host/core.c
+index 6d201df..5cd9028 100644
+--- a/drivers/nvme/host/core.c
++++ b/drivers/nvme/host/core.c
+@@ -XXX,6 +XXX,XXX @@
++#include <trace/events/kairo.h>
++
++/*
++ * COMPILE-TARGET: trace_kairo_backend_mapped() call site.
++ *
++ * Place inside or near nvme_kairo_prepare_backend_hint() after
++ * kairo_backend_hint_apply_caps() has populated the hint fields.
++ *
++ * The tracepoint exposes the backend class, stream/FDP/ZNS hint values,
++ * and no-op fallback flag.
++ */
++static void kairo_trace_backend(struct request *rq,
++				struct kairo_backend_hint *hint)
++{
++	trace_kairo_backend_mapped(
++		rq->q->sysfs_dev->devt, blk_rq_pos(rq), blk_rq_bytes(rq),
++		hint->backend_class, hint->stream_id, hint->fdp_placement_id,
++		hint->zone_hint,
++		(hint->flags & KAIRO_BACKEND_F_NOOP_FALLBACK) ? 1 : 0,
++		hint->flags);
++}

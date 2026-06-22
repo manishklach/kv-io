@@ -11,6 +11,7 @@
 | placement/lifetime | `0007` | implemented | model/session/lifetime metadata with helpers and synthetic defaults |
 | NVMe/ZNS/FDP mapping | `0008` | implemented | generic backend mapping scaffold: `kairo_backend_class`, `kairo_backend_hint`, feature-detected NVMe hooks with no-op fallback; benchmark-visible via `--backend-mode` |
 | debug counters | `0009` | implemented | compile-targeted Linux 6.8.x sysfs counters and tunables; Stage 6 scaffold placement/lifetime counters |
+| tracepoints | `0010` | scaffolded | RFC/POC tracepoint layer: 9 tracepoints covering classification, scheduler decisions, dispatch, demotion, merge, semantic flags, placement metadata, and backend mapping; bpftrace scripts; trace experiment harness; trace parser |
 
 ## Stage 6.5 Status
 
@@ -19,6 +20,27 @@
 | Placement experiment harness | implemented | Hardened `run_stage6_placement_experiment.sh` with `<file-path> <block-device>`, structured results, counter deltas, CSV output |
 | Summary parser | implemented | `parse_stage6_placement_summary.py` with `--csv` and `--pretty` output, counter delta columns |
 | Counter coverage | updated | `collect_kairo_counters.sh` includes both naming sets for Stage 6 counters |
+
+## Stage 8 Status
+
+| Area | Status | Notes |
+|------|--------|-------|
+| Tracepoint header | scaffolded | `include/trace/events/kairo.h` with 9 TRACE_EVENT definitions |
+| Classification tracepoint | scaffolded | `kairo_request_classified` — io_class, hint_source, flags |
+| Scheduler decision tracepoint | scaffolded | `kairo_scheduler_decision` — decision, reason, budget, deadline_ns |
+| Decode/prefetch dispatch tracepoints | scaffolded | `kairo_decode_dispatch`, `kairo_prefetch_dispatch` — budget, latency/deadline |
+| Demotion tracepoint | scaffolded | `kairo_write_demoted` — io_class, reason, starvation_escape |
+| Merge decision tracepoint | conceptual | `kairo_merge_decision` — depends on Stage 3 merge instrumentation |
+| Semantic classified tracepoint | conceptual | `kairo_semantic_classified` — depends on Stage 5 metadata plumbing |
+| Placement classified tracepoint | scaffolded | `kairo_placement_classified` — model/session/cache-pool/lifetime |
+| Backend mapped tracepoint | scaffolded | `kairo_backend_mapped` — backend_class, stream/fdp/zone hints |
+| bpftrace latency script | implemented | `scripts/bpftrace/kairo_latency.bt` |
+| bpftrace dispatch script | implemented | `scripts/bpftrace/kairo_dispatch.bt` |
+| bpftrace backend script | implemented | `scripts/bpftrace/kairo_backend.bt` |
+| Trace experiment script | implemented | `scripts/run_stage8_trace_experiment.sh` |
+| Trace log parser | implemented | `scripts/parse_stage8_trace_log.py` with `--csv` and `--pretty` |
+| Tracepoint audit script | implemented | `kernel/integration/linux-6.8/audit_tracepoints.sh` |
+| Stage 8 documentation | implemented | `docs/stage8_kernel_observability.md` |
 
 ## Stage 7 Status
 
