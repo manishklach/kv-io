@@ -49,27 +49,27 @@ jobs:
             mkdir -p "$LINUX_CACHE_DIR"
             git init "$LINUX_CACHE_DIR"
             git -C "$LINUX_CACHE_DIR" remote add origin "$LINUX_REMOTE"
-            git -C "$LINUX_CACHE_DIR" config core.sparseCheckout true
-            printf '%s\n' \
-              /Makefile \
-              /Kconfig \
-              block/ \
-              drivers/nvme/host/ \
-              fs/ \
-              include/ \
-              io_uring/ \
-              mm/ \
-              scripts/ \
-              arch/x86/ \
-              arch/arm64/ \
-              kernel/ \
-              lib/ \
-              init/ \
-              usr/ \
-              crypto/ \
-              security/ \
-              > "$LINUX_CACHE_DIR/.git/info/sparse-checkout"
           fi
+          git -C "$LINUX_CACHE_DIR" config core.sparseCheckout true
+          printf '%s\n' \
+            /Makefile \
+            /Kconfig \
+            block/ \
+            drivers/nvme/host/ \
+            fs/ \
+            include/ \
+            io_uring/ \
+            mm/ \
+            scripts/ \
+            arch/x86/ \
+            arch/arm64/ \
+            kernel/ \
+            lib/ \
+            init/ \
+            usr/ \
+            crypto/ \
+            security/ \
+            > "$LINUX_CACHE_DIR/.git/info/sparse-checkout"
           git -C "$LINUX_CACHE_DIR" fetch --depth 1 origin "$LINUX_REF"
           git -C "$LINUX_CACHE_DIR" checkout --force FETCH_HEAD
 
