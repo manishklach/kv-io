@@ -57,7 +57,7 @@ fail() {
 }
 
 [[ -d "$LINUX_TREE" ]] || fail "Linux source tree not found: $LINUX_TREE"
-[[ -f "$LINUX_TREE/Makefile" ]] || fail "kernel Makefile not found in: $LINUX_TREE"
+[[ -d "$LINUX_TREE/block" ]] || fail "Linux block/ dir not found in: $LINUX_TREE"
 
 for patch in "${full_series[@]}"; do
   [[ -f "$patch" ]] || fail "missing patch: $patch"

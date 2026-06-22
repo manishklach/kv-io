@@ -51,6 +51,8 @@ jobs:
             git -C "$LINUX_CACHE_DIR" remote add origin "$LINUX_REMOTE"
             git -C "$LINUX_CACHE_DIR" config core.sparseCheckout true
             printf '%s\n' \
+              /Makefile \
+              /Kconfig \
               block/ \
               drivers/nvme/host/ \
               fs/ \
