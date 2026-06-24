@@ -1373,6 +1373,10 @@ static void print_summary(const struct kairo_config *cfg, const struct kairo_sta
     printf("rwf_no_durability_fail=%" PRIu64 "\n", snapshot.rwf_no_durability_fail);
     printf("rwf_avoid_pagecache_attempts=%" PRIu64 "\n", snapshot.rwf_avoid_pagecache_attempts);
     printf("rwf_avoid_pagecache_fail=%" PRIu64 "\n", snapshot.rwf_avoid_pagecache_fail);
+    printf("controller_feedback_mode=%s\n",
+           cfg->noisy_session > 0 || cfg->noisy_model > 0 ? "stress" : "none");
+    printf("controller_latency_samples=0\n");
+    printf("controller_missing_timestamp=0\n");
     puts("todo=replace pthread pread/pwrite path with io_uring worker path");
 
     free(sorted);

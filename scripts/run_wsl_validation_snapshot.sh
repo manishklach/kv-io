@@ -64,6 +64,7 @@ declare -A SUMMARY=(
   [stage7_dryrun]="fail"
   [stage8_dryrun]="missing_script"
   [stage13_dryrun]="missing_script"
+  [stage14_dryrun]="missing_script"
   [user_bench_baseline]="skipped"
   [user_bench_mixed]="skipped"
   [results_dir]="$RESULTS_DIR"
@@ -93,6 +94,7 @@ record_summary() {
     echo "stage7_dryrun=${SUMMARY[stage7_dryrun]}"
     echo "stage8_dryrun=${SUMMARY[stage8_dryrun]}"
     echo "stage13_dryrun=${SUMMARY[stage13_dryrun]}"
+    echo "stage14_dryrun=${SUMMARY[stage14_dryrun]}"
     echo "user_bench_baseline=${SUMMARY[user_bench_baseline]}"
     echo "user_bench_mixed=${SUMMARY[user_bench_mixed]}"
     echo "results_dir=${SUMMARY[results_dir]}"
@@ -213,6 +215,24 @@ if [[ -f "$REPO_ROOT/scripts/run_stage8_trace_experiment.sh" ]]; then
 else
   echo "run_stage8_trace_experiment.sh not found" > "$stage8_dryrun_log"
   SUMMARY[stage8_dryrun]="missing_script"
+fi
+
+# Stage 14 dry-run
+if [[ -f "$REPO_ROOT/scripts/run_stage14_controller_feedback_experiment.sh" ]]; then
+  if $DRY_RUN; then
+    printf '%s\n' "./scripts/run_stage14_controller_feedback_experiment.sh \"$TEST_FILE\" loop0 --skip-counters --dry-run --duration \"$DURATION\"" > "$RESULTS_DIR/stage14_dryrun.log"
+    SUMMARY[stage14_dryrun]="pass"
+  else
+    if run_logged "$RESULTS_DIR/stage14_dryrun.log" "$REPO_ROOT/scripts/run_stage14_controller_feedback_experiment.sh" \
+      "$TEST_FILE" loop0 --skip-counters --dry-run --duration "$DURATION"; then
+      SUMMARY[stage14_dryrun]="pass"
+    else
+      SUMMARY[stage14_dryrun]="fail"
+    fi
+  fi
+else
+  echo "run_stage14_controller_feedback_experiment.sh not found" > "$RESULTS_DIR/stage14_dryrun.log"
+  SUMMARY[stage14_dryrun]="missing_script"
 fi
 
 # Stage 13 dry-run

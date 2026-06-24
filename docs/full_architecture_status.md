@@ -23,6 +23,7 @@
 | foundation tracepoints | `0022` / foundation `0005` | compile-targeted | Four compile-targeted tracepoints (classify, decode dispatch, prefetch dispatch, write demoted) for Linux 6.8.x foundation; optional apply via `--with-tracepoints`; `LINUX-6.8-CHECK` annotations |
 | model/session fairness | `0020` | conceptual | Per-model and per-session fairness scheduler for multi-tenant AI inference; credit-based decode scheduling; prefetch throttling and write demotion under fairness pressure; noisy session detection; seven sysfs counters; five canonical experiment cases |
 | decode latency histogram | `0023` | conceptual | Bucketed decode latency histogram with p95/p99 tail estimator; replaces avg/max heuristic in Stage 10 controller; 10 histogram buckets; 12 sysfs counters; five canonical experiment cases; user-space benchmark histogram output |
+| controller feedback wiring | `0024` | conceptual | Wires decode latency observations into the Stage 10 adaptive controller; timestamp metadata in request hints; classify/dispatch time recording; missing timestamp handling; histogram-based controller update; 5 feedback counters; 5 canonical experiment cases; `kairo_controller_sample` tracepoint (documented only) |
 
 ## Stage 6.5 Status
 
@@ -136,6 +137,24 @@
 | Summary parser | implemented | `parse_stage11_foundation_trace_summary.py` with CSV and pretty-printed output |
 | Stage 11 documentation | implemented | `docs/stage11_foundation_tracepoints.md` |
 
+## Stage 14 Status
+
+| Area | Status | Notes |
+|------|--------|-------|
+| Timestamp metadata in request hints | scaffolded | `classify_time_ns`, `dispatch_time_ns`, `decode_queue_latency_us` in `kairo_request_hints` |
+| `kairo_mark_classify_time()` | compile-targeted | Inline helper in blk-mq.h |
+| `kairo_mark_dispatch_time()` | compile-targeted | Inline helper in blk-mq.h |
+| `kairo_decode_queue_latency_us()` | compile-targeted | Computes queue delay from timestamps |
+| Dispatch call site | conceptual | `dd_kairo_dispatch_decode_request()` records dispatch and feeds controller |
+| Controller histogram integration | conceptual | `dd_kairo_controller_update()` uses Stage 13 histogram for p95/p99 |
+| Missing timestamp handling | conceptual | Zero classify_time increments `controller_missing_timestamp` |
+| Feedback sysfs counters | scaffolded | 5 counters defined in patch |
+| `kairo_controller_sample` tracepoint | documented | TRACE_EVENT documented in patch comments; not wired |
+| Experiment harness | implemented | `run_stage14_controller_feedback_experiment.sh` with five canonical cases |
+| Summary parser | implemented | `parse_stage14_controller_feedback_summary.py` with CSV and pretty output, counter delta columns |
+| Counter coverage | updated | `collect_kairo_counters.sh` includes Stage 14 counters |
+| Stage 14 documentation | implemented | `docs/stage14_controller_feedback_wiring.md` |
+
 ## Stage 13 Status
 
 | Area | Status | Notes |
@@ -206,6 +225,7 @@ intentionally uneven:
 - Stage 7 benchmark output: `backend_mode`, `backend_class`, `stream_id`, `fdp_placement_id`, `zone_hint`, `backend_noop_fallback`
 - counter deltas via `scripts/collect_kairo_counters.sh`
 - Stage 13 histogram bucket counts from user-space benchmark samples
+- Stage 14 controller feedback fields from benchmark output
 
 ## What Needs Real Kernel Validation Next
 

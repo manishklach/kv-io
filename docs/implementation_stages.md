@@ -358,3 +358,36 @@ framework:
   - interaction with Stage 12 fairness
   - tracepoint for histogram snapshot (future segment)
   - merged histogram across devices
+
+## Stage 14
+
+- Broad RFC/POC patches involved: `0024`
+- Docs: `docs/stage14_controller_feedback_wiring.md`
+- Scripts:
+  - `scripts/run_stage14_controller_feedback_experiment.sh`
+  - `scripts/parse_stage14_controller_feedback_summary.py`
+- What should compile:
+  - timestamp fields `classify_time_ns`, `dispatch_time_ns`, `decode_queue_latency_us`
+    in `struct kairo_request_hints`
+  - helpers: `kairo_mark_classify_time()`, `kairo_mark_dispatch_time()`,
+    `kairo_decode_queue_latency_us()`
+  - call site in `dd_kairo_dispatch_decode_request()` for decode reads
+  - controller feedback counters: `kairo_controller_latency_samples`,
+    `kairo_controller_missing_timestamp`, `kairo_controller_latency_updates`,
+    `kairo_controller_histogram_resets`, `kairo_controller_decode_latency_gt_target`
+  - histogram-based p95/p99 in `dd_kairo_controller_update()`
+  - histogram reset on control window expiry
+  - `kairo_controller_sample` tracepoint (documented only)
+- What should be measurable:
+  - controller feedback counter movement in sysfs on patched kernel
+  - decode queue latency fed into histogram on every decode dispatch
+  - missing timestamp detection when classify_time is zero
+  - five canonical experiment cases
+  - structured output under `results/stage14/<timestamp>/`
+  - parser output with counter delta columns
+- What is still RFC-only:
+  - timestamp recording in `dd_kairo_dispatch_decode_request()` (CONCEPTUAL-HOOK)
+  - `kairo_controller_sample` tracepoint (documented, not wired)
+  - per-device timestamp tracking (uses per-request metadata)
+  - interaction with BPF dispatch hook (patch 0016)
+  - interaction with Stage 12 fairness throttle path

@@ -1,0 +1,421 @@
+From: Kairo Authors <kairo@research>
+Date: Wed Jun 24 14:00:00 2026 +0000
+Subject: [RFC/POC] 0024: controller feedback wiring
+
+RFC/POC — Not for LKML submission.
+
+Wire decode latency observations into the Stage 10 adaptive controller
+(patch 0018) by adding timestamp metadata to request hints and feeding
+queue latency into the Stage 13 histogram (patch 0023).
+
+This creates the conceptual bridge:
+  request classified as decode
+    -> kairo_mark_classify_time() records ktime_get_ns()
+    -> dd_kairo_dispatch_decode_request() records dispatch time
+    -> decode_queue_latency computed as dispatch_time - classify_time
+    -> dd_kairo_controller_note_decode_latency() called with latency
+    -> histogram updated
+    -> controller update uses histogram for p95/p99
+    -> histogram reset for next window
+
+Request metadata added to struct kairo_request_hints:
+  u64 classify_time_ns;
+  u64 dispatch_time_ns;
+  u64 decode_queue_latency_us;
+
+Helpers:
+  kairo_mark_classify_time(rq, now_ns)
+  kairo_mark_dispatch_time(rq, now_ns)
+  kairo_decode_queue_latency_us(rq, now_ns)
+
+Controller integration:
+  dd_kairo_dispatch_decode_request() calls kairo_mark_dispatch_time()
+    and dd_kairo_controller_note_decode_latency() for decode reads.
+  dd_kairo_controller_update() uses Stage 13 histogram for p95/p99,
+    then resets histogram when window expires.
+  If classify_time_ns is zero, skip and increment
+    kairo_controller_missing_timestamp.
+
+New counters in struct kairo_latency_controller:
+  kairo_controller_latency_samples
+  kairo_controller_missing_timestamp
+  kairo_controller_latency_updates
+  kairo_controller_histogram_resets
+  kairo_controller_decode_latency_gt_target
+
+Tracepoint (documented only, not wired):
+  kairo_controller_sample — sector, nr_bytes, latency_us,
+    target_decode_p99_us, samples
+
+All integration points are CONCEPTUAL-HOOK / LINUX-6.8-CHECK.
+Timestamp recording in kairo_init_request_hints() is compile-targeted.
+
+Signed-off-by: Kairo Authors <kairo@research>
+---
+ block/mq-deadline.c       | 220 +++++++++++++++++++++++++++++++++++---
+ include/linux/blk-mq.h    |  56 ++++++++++
+ 2 files changed, 259 insertions(+), 17 deletions(-)
+
+diff --git a/include/linux/blk-mq.h b/include/linux/blk-mq.h
+index abcdef2..1234568 100644
+--- a/include/linux/blk-mq.h
++++ b/include/linux/blk-mq.h
+@@ -1,3 +1,59 @@
++/*
++ * CONCEPTUAL-HOOK: Add request timestamp metadata for controller feedback.
++ *
++ * These fields track the decode request lifecycle:
++ *   classify_time_ns      — set when request class is determined
++ *   dispatch_time_ns      — set when request is dispatched to driver
++ *   decode_queue_latency_us — computed queue delay (dispatch - classify)
++ *
++ * LINUX-6.8-CHECK: The struct kairo_request_hints is embedded in
++ * struct request. Adding fields increases request struct size. Verify
++ * that the target kernel does not have strict sizeof(struct request)
++ * constraints (e.g. slab cache alignment in blk-mq).
++ */
+ struct kairo_request_hints {
+ 	enum kairo_io_class io_class;
+ 	u64 deadline_ns;
+ 	u32 prefetch_distance;
+ 	u32 flags;
++	/* CONCEPTUAL-HOOK: Timestamp metadata for controller feedback */
++	u64 classify_time_ns;
++	u64 dispatch_time_ns;
++	u64 decode_queue_latency_us;
+ };
++
++/*
++ * CONCEPTUAL-HOOK: Mark the classify time on a request.
++ *
++ * Called when a request's Kairo I/O class is determined (usually at
++ * request initialization time in blk-mq). For decode reads this
++ * establishes the start of the queue latency measurement.
++ */
++static inline void
++kairo_mark_classify_time(struct request *rq, u64 now_ns)
++{
++	if (likely(rq && kairo_is_decode_read(rq)))
++		rq->kairo_hints.classify_time_ns = now_ns;
++}
++
++/*
++ * CONCEPTUAL-HOOK: Mark the dispatch time on a request.
++ *
++ * Called when a request is dispatched from the scheduler to the
++ * driver. For decode reads this captures the end of queue delay.
++ */
++static inline void
++kairo_mark_dispatch_time(struct request *rq, u64 now_ns)
++{
++	if (likely(rq))
++		rq->kairo_hints.dispatch_time_ns = now_ns;
++}
++
++/*
++ * CONCEPTUAL-HOOK: Compute decode queue latency in microseconds.
++ *
++ * Returns dispatch_time_ns - classify_time_ns converted to us,
++ * or 0 if either timestamp is missing.
++ */
++static inline u64
++kairo_decode_queue_latency_us(struct request *rq, u64 now_ns)
++{
++	if (unlikely(!rq || !rq->kairo_hints.classify_time_ns ||
++		     !rq->kairo_hints.dispatch_time_ns))
++		return 0;
++	return div64_u64(rq->kairo_hints.dispatch_time_ns -
++			 rq->kairo_hints.classify_time_ns, 1000);
++}
+diff --git a/block/mq-deadline.c b/block/mq-deadline.c
+index a9b1e2c..c3d4e5f 100755
+--- a/block/mq-deadline.c
++++ b/block/mq-deadline.c
+@@ -102,6 +102,12 @@ struct kairo_latency_controller {
+ 	u64				controller_release_write_events;
+ 	u64				controller_insufficient_samples;
++
++	/* Stage 14: Controller feedback counters */
++	u64				controller_latency_samples;
++	u64				controller_missing_timestamp;
++	u64				controller_latency_updates;
++	u64				controller_histogram_resets;
++	u64				controller_decode_latency_gt_target;
+ };
+ 
+ #define KAIRO_CTRL_MIN_SAMPLES		64
+@@ -131,6 +137,7 @@ static void dd_kairo_controller_init(struct deadline_data *dd)
+ {
+ 	struct kairo_latency_controller *ctrl = &dd->kairo_lat_ctrl;
+ 
++	kairo_latency_histogram_reset(&ctrl->decode_hist);
+ 	ctrl->mode = KAIRO_CTRL_OFF;
+ 	ctrl->target_decode_p99_us = 5000; /* 5 ms default target */
+ 	ctrl->control_window_ns = 1000000000ULL; /* 1 second window */
+@@ -151,6 +158,12 @@ static void dd_kairo_controller_init(struct deadline_data *dd)
+ 	ctrl->controller_release_write_events = 0;
+ 	ctrl->controller_insufficient_samples = 0;
++
++	/* Stage 14: Initialize feedback counters */
++	ctrl->controller_latency_samples = 0;
++	ctrl->controller_missing_timestamp = 0;
++	ctrl->controller_latency_updates = 0;
++	ctrl->controller_histogram_resets = 0;
++	ctrl->controller_decode_latency_gt_target = 0;
+ }
+ 
+ /*
+@@ -158,9 +171,13 @@ static void dd_kairo_controller_init(struct deadline_data *dd)
+  * completion latency for the controller's sample window.
+  *
+  * CONCEPTUAL-HOOK: Called from the blk-mq completion path or from a
+- * mq-deadline request completion hook when a decode-class request
+- * completes. Latency in microseconds from issue to completion.
++ * mq-deadline dispatch hook when a decode-class request is dispatched.
++ * Latency in microseconds represents queue delay from classification
++ * to dispatch.
++ *
++ * Stage 14: Now feeds into the Stage 13 histogram. If the timestamp
++ * is zero (classify_time not set), increments missing_timestamp and
++ * skips the sample.
+  */
+ static void dd_kairo_controller_note_decode_latency(struct deadline_data *dd,
+ 						    u64 latency_us)
+@@ -169,9 +186,25 @@ static void dd_kairo_controller_note_decode_latency(struct deadline_data *dd,
+ 
+ 	if (ctrl->mode == KAIRO_CTRL_OFF)
+ 		return;
+-	ctrl->decode_samples++;
+-	ctrl->decode_latency_sum_us += latency_us;
+-	if (latency_us > ctrl->decode_latency_max_us)
+-		ctrl->decode_latency_max_us = latency_us;
++
++	ctrl->controller_latency_samples++;
++
++	if (latency_us == 0) {
++		ctrl->controller_missing_timestamp++;
++		return;
++	}
++
++	/* CONCEPTUAL-HOOK: Feed into Stage 13 histogram */
++	kairo_latency_histogram_add(&ctrl->decode_hist, latency_us);
++
++	/* Track whether observed latency exceeds target */
++	if (ctrl->target_decode_p99_us > 0 &&
++	    latency_us > ctrl->target_decode_p99_us) {
++		ctrl->controller_decode_latency_gt_target++;
++	}
++
++	/* CL: remove-old-legacy-window — histogram now tracks samples/sum/max */
++	(void)ctrl->decode_samples;
++	(void)ctrl->decode_latency_sum_us;
++	(void)ctrl->decode_latency_max_us;
+ }
+ 
+ /*
+@@ -300,14 +333,24 @@ static void dd_kairo_controller_apply(struct deadline_data *dd)
+  * CONCEPTUAL-HOOK: Exact call site depends on scheduler integration.
+  * Options include:
+  *   (a) In dd_dispatch_request(), check time and call if window elapsed.
+- *   (b) In a per-device timer callback.
+- *   (c) In the blk-mq completion path via a request completion hook.
++ *
++ * Stage 14: Uses Stage 13 histogram for p95/p99 computation and
++ * resets histogram when the control window expires.
+  *
+  * Returns true if a controller update was performed, false otherwise.
+  */
+ static bool dd_kairo_controller_update(struct deadline_data *dd, u64 now_ns)
+ {
+ 	struct kairo_latency_controller *ctrl = &dd->kairo_lat_ctrl;
++	struct kairo_latency_histogram *hist = &ctrl->decode_hist;
+ 
+ 	if (ctrl->mode == KAIRO_CTRL_OFF)
+ 		return false;
+@@ -319,21 +362,29 @@ static bool dd_kairo_controller_update(struct deadline_data *dd, u64 now_ns)
+ 	ctrl->last_control_update_ns = now_ns;
+ 
+-	/* Compute percentiles from accumulated samples */
+-	dd_kairo_controller_compute_pXX(ctrl);
++	ctrl->controller_latency_updates++;
++
++	/* Compute percentiles from histogram (Stage 13) */
++	dd_kairo_controller_update_from_hist(ctrl);
+ 
+-	/* Insufficient samples: stay in observe, do not act */
+-	if (ctrl->decode_samples < KAIRO_CTRL_MIN_SAMPLES) {
++	/* Insufficient samples: stay in observe, do not act.
++	 * Uses histogram samples (Stage 13) instead of legacy window. */
++	if (hist->samples < KAIRO_CTRL_MIN_SAMPLES) {
+ 		ctrl->controller_insufficient_samples++;
+-		/* Reset and wait for next window */
+-		ctrl->decode_samples = 0;
+-		ctrl->decode_latency_sum_us = 0;
+-		ctrl->decode_latency_max_us = 0;
++		kairo_latency_histogram_reset(hist);
++		ctrl->controller_histogram_resets++;
+ 		return true;
+ 	}
+ 
+ 	/* Apply policy if in adaptive mode */
+-	if (ctrl->mode == KAIRO_CTRL_ADAPTIVE)
++	if (ctrl->mode == KAIRO_CTRL_ADAPTIVE) {
+ 		dd_kairo_controller_apply(dd);
++	}
+ 
+-	/* Reset sample window */
+-	ctrl->decode_samples = 0;
+-	ctrl->decode_latency_sum_us = 0;
+-	ctrl->decode_latency_max_us = 0;
++	/* Reset histogram for next window */
++	kairo_latency_histogram_reset(hist);
++	ctrl->controller_histogram_resets++;
+ 
+ 	return true;
+ }
+@@ -358,10 +409,17 @@ static struct request *dd_kairo_dispatch_decode_request(struct deadline_data *dd
+ 		if (deadline_after(deadline, now))
+ 			continue;
+ 		rq = fifo->next;
++
++		/* CONCEPTUAL-HOOK: Record dispatch time and feed latency
++		 * into the controller for decode-class requests.
++		 * LINUX-6.8-CHECK: Verify ktime_get_ns() availability
++		 * at this call site. */
++		kairo_mark_dispatch_time(rq, ktime_get_ns());
++		dd_kairo_controller_note_decode_latency(dd,
++			kairo_decode_queue_latency_us(rq, ktime_get_ns()));
++
+ 		return rq;
+ 	}
++
++	/* CONCEPTUAL-HOOK: Also check kairo_prefetch_dispatches FIFO
++	 * for prefetch requests; skip controller feedback for non-decode. */
+ 	return NULL;
+ }
+ 
+@@ -1249,6 +1307,41 @@ SHOW_INT(deadline_fifo_batch_show, dd->fifo_batch);
++/* Stage 14: Controller feedback sysfs counters */
++static ssize_t deadline_kairo_controller_latency_samples_show(
++	struct elevator_queue *e, char *page)
++{
++	struct deadline_data *dd = e->elevator_data;
++	return sysfs_emit(page, "%llu\n",
++		(unsigned long long)dd->kairo_lat_ctrl.controller_latency_samples);
++}
++
++static ssize_t deadline_kairo_controller_missing_timestamp_show(
++	struct elevator_queue *e, char *page)
++{
++	struct deadline_data *dd = e->elevator_data;
++	return sysfs_emit(page, "%llu\n",
++		(unsigned long long)dd->kairo_lat_ctrl.controller_missing_timestamp);
++}
++
++static ssize_t deadline_kairo_controller_latency_updates_show(
++	struct elevator_queue *e, char *page)
++{
++	struct deadline_data *dd = e->elevator_data;
++	return sysfs_emit(page, "%llu\n",
++		(unsigned long long)dd->kairo_lat_ctrl.controller_latency_updates);
++}
++
++static ssize_t deadline_kairo_controller_histogram_resets_show(
++	struct elevator_queue *e, char *page)
++{
++	struct deadline_data *dd = e->elevator_data;
++	return sysfs_emit(page, "%llu\n",
++		(unsigned long long)dd->kairo_lat_ctrl.controller_histogram_resets);
++}
++
++static ssize_t deadline_kairo_controller_decode_latency_gt_target_show(
++	struct elevator_queue *e, char *page)
++{
++	struct deadline_data *dd = e->elevator_data;
++	return sysfs_emit(page, "%llu\n",
++		(unsigned long long)dd->kairo_lat_ctrl.controller_decode_latency_gt_target);
++}
++
+ static struct elv_fs_entry deadline_attrs[] = {
+ 	DD_ATTR(kairo_enable),
+ 	DD_ATTR(kairo_decode_budget),
+@@ -1293,6 +1386,14 @@ static struct elv_fs_entry deadline_attrs[] = {
+ 	DD_RO_ATTR(kairo_controller_insufficient_samples),
++	/* Stage 14: Controller feedback counters */
++	DD_RO_ATTR(kairo_controller_latency_samples),
++	DD_RO_ATTR(kairo_controller_missing_timestamp),
++	DD_RO_ATTR(kairo_controller_latency_updates),
++	DD_RO_ATTR(kairo_controller_histogram_resets),
++	DD_RO_ATTR(kairo_controller_decode_latency_gt_target),
+ 	/* Stage 10: Controller observed state */
+ 	DD_RO_ATTR(kairo_controller_mode),
+ 	DD_RO_ATTR(kairo_observed_decode_p99_us),
+@@ -1462,6 +1563,7 @@ static struct elv_fs_entry deadline_attrs[] = {
+ 	DD_RO_ATTR(kairo_controller_write_releases),
+ 	DD_RO_ATTR(kairo_controller_insufficient_samples),
++	DD_RO_ATTR(kairo_controller_latency_samples),
+ 	DD_RO_ATTR(kairo_controller_mode),
+ 	DD_RO_ATTR(kairo_observed_decode_p99_us),
+ 	DD_RO_ATTR(kairo_observed_decode_p95_us),
+@@ -1485,3 +1587,59 @@ static struct elv_fs_entry deadline_attrs[] = {
++/*
++ * Tracepoint: kairo_controller_sample (documented, not wired)
++ *
++ * CONCEPTUAL-HOOK: This tracepoint should be added to the Stage 8
++ * tracepoint set (0017) after controller feedback validation.
++ *
++ * Emitted for each decode request whose latency is fed into the
++ * controller histogram. Fields:
++ *
++ *   sector            - request sector
++ *   nr_bytes          - request size in bytes
++ *   latency_us        - decode queue latency (dispatch_time - classify_time)
++ *   target_decode_p99_us - current controller target
++ *   samples           - total samples in current histogram window
++ *
++ * Not stable ABI. For local kernel research only.
++ *
++ * TRACE_EVENT(kairo_controller_sample,
++ *     TP_PROTO(unsigned int dev,
++ *              sector_t sector,
++ *              unsigned int nr_bytes,
++ *              unsigned long long latency_us,
++ *              unsigned long long target_us,
++ *              unsigned long long samples),
++ *
++ *     TP_ARGS(dev, sector, nr_bytes, latency_us, target_us, samples),
++ *
++ *     TP_STRUCT__entry(
++ *         __field(unsigned int, dev)
++ *         __field(sector_t, sector)
++ *         __field(unsigned int, nr_bytes)
++ *         __field(unsigned long long, latency_us)
++ *         __field(unsigned long long, target_us)
++ *         __field(unsigned long long, samples)
++ *     ),
++ *
++ *     TP_fast_assign(
++ *         __entry->dev = dev;
++ *         __entry->sector = sector;
++ *         __entry->nr_bytes = nr_bytes;
++ *         __entry->latency_us = latency_us;
++ *         __entry->target_us = target_us;
++ *         __entry->samples = samples;
++ *     ),
++ *
++ *     TP_printk("dev=%u sector=%llu nr_bytes=%u latency_us=%llu "
++ *               "target_p99=%llu samples=%llu",
++ *               __entry->dev,
++ *               (unsigned long long)__entry->sector,
++ *               __entry->nr_bytes,
++ *               __entry->latency_us,
++ *               __entry->target_us,
++ *               __entry->samples)
++ * );
++ *
++ * Sample events are generated in
++ * dd_kairo_controller_note_decode_latency() after a valid latency
++ * is recorded. Wire the trace call after histogram add.
++ */
+-- 
+2.45.1

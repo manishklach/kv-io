@@ -502,6 +502,47 @@ grep -qF "kairo_decode_lat_0_10us" "$REPO_ROOT/scripts/collect_kairo_counters.sh
 grep -qF "stage13_dryrun" "$REPO_ROOT/scripts/run_wsl_validation_snapshot.sh" || \
   fail "Stage 13: run_wsl_validation_snapshot.sh missing stage13_dryrun"
 
+# Stage 14: verify controller feedback wiring
+stage14_has_pattern() {
+  local file="$1" pattern="$2"
+  grep -qF -- "$pattern" "$file" || fail "Stage 14: missing pattern '$pattern' in $(basename "$file")"
+}
+
+stage14_file_exists() {
+  [[ -f "$1" ]] || fail "Stage 14: missing file: $1"
+}
+
+P24="$PATCH_DIR/0024-rfc-kairo-controller-feedback-wiring.patch"
+DOC14="$REPO_ROOT/docs/stage14_controller_feedback_wiring.md"
+R14SE="$REPO_ROOT/scripts/run_stage14_controller_feedback_experiment.sh"
+P14SP="$REPO_ROOT/scripts/parse_stage14_controller_feedback_summary.py"
+
+stage14_file_exists "$P24"
+stage14_file_exists "$DOC14"
+stage14_file_exists "$R14SE"
+stage14_file_exists "$P14SP"
+stage14_has_pattern "$P24" "kairo_mark_classify_time"
+stage14_has_pattern "$P24" "kairo_mark_dispatch_time"
+stage14_has_pattern "$P24" "kairo_decode_queue_latency_us"
+stage14_has_pattern "$P24" "dd_kairo_controller_note_decode_latency"
+stage14_has_pattern "$P24" "controller_latency_samples"
+stage14_has_pattern "$P24" "controller_missing_timestamp"
+stage14_has_pattern "$P24" "kairo_controller_sample"
+stage14_has_pattern "$DOC14" "classify_time_ns"
+stage14_has_pattern "$R14SE" "results/stage14"
+stage14_has_pattern "$R14SE" "block-device"
+stage14_has_pattern "$P14SP" "--csv"
+stage14_has_pattern "$P14SP" "--pretty"
+stage14_has_pattern "$P14SP" "controller_latency_samples_delta"
+
+# Verify collect_kairo_counters.sh includes feedback counters
+grep -qF "kairo_controller_latency_samples" "$REPO_ROOT/scripts/collect_kairo_counters.sh" || \
+  fail "Stage 14: collect_kairo_counters.sh missing kairo_controller_latency_samples"
+
+# Verify WSL validation includes stage14_dryrun
+grep -qF "stage14_dryrun" "$REPO_ROOT/scripts/run_wsl_validation_snapshot.sh" || \
+  fail "Stage 14: run_wsl_validation_snapshot.sh missing stage14_dryrun"
+
 # Stage 9: verify WSL validation files
 [[ -f "$REPO_ROOT/scripts/check_wsl_environment.sh" ]] || fail "Stage 9: missing scripts/check_wsl_environment.sh"
 [[ -f "$REPO_ROOT/scripts/run_wsl_validation_snapshot.sh" ]] || fail "Stage 9: missing scripts/run_wsl_validation_snapshot.sh"

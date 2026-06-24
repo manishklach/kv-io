@@ -118,6 +118,13 @@ counter_names=(
   kairo_controller_write_releases
   kairo_controller_insufficient_samples
 
+  # Stage 14: controller feedback counters
+  kairo_controller_latency_samples
+  kairo_controller_missing_timestamp
+  kairo_controller_latency_updates
+  kairo_controller_histogram_resets
+  kairo_controller_decode_latency_gt_target
+
   # Stage 13: decode latency histogram bucket counters
   kairo_decode_lat_0_10us
   kairo_decode_lat_10_25us

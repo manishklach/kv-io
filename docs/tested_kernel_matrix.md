@@ -134,3 +134,29 @@ Stage 13 is **not** foundation-integrated, **not** LKML-ready, and **not**
 boot-validated. It is an RFC/POC histogram scaffold. Completion-path call sites
 are CONCEPTUAL-HOOK. Kernel-side histogram movement is not claimed unless
 tested on a patched kernel.
+
+## Stage 14 Controller Feedback Wiring Status
+
+Stage 14 (`0024`) wires decode latency observations into the Stage 10 controller:
+
+- **Timestamp metadata**: `classify_time_ns`, `dispatch_time_ns`, `decode_queue_latency_us`
+  added to `struct kairo_request_hints` in `include/linux/blk-mq.h`
+- **Helpers**: `kairo_mark_classify_time()`, `kairo_mark_dispatch_time()`,
+  `kairo_decode_queue_latency_us()` — compile-targeted inline functions
+- **Dispatch call site**: `dd_kairo_dispatch_decode_request()` records dispatch time
+  and feeds decode queue latency into the controller (CONCEPTUAL-HOOK)
+- **Missing timestamp handling**: Zero classify_time increments
+  `kairo_controller_missing_timestamp` and skips the sample
+- **Histogram integration**: Controller update uses Stage 13 histogram for
+  p95/p99 estimation instead of avg/max heuristic; histogram reset on window expiry
+- **Sysfs counters**: `kairo_controller_latency_samples`,
+  `kairo_controller_missing_timestamp`, `kairo_controller_latency_updates`,
+  `kairo_controller_histogram_resets`, `kairo_controller_decode_latency_gt_target`
+- **Tracepoint**: `kairo_controller_sample` documented but not wired
+- **Experiment harness**: Five canonical cases with structured results under
+  `results/stage14/<timestamp>/`
+
+Stage 14 is **not** foundation-integrated, **not** LKML-ready, and **not**
+boot-validated. The dispatch call site is CONCEPTUAL-HOOK with LINUX-6.8-CHECK
+annotations. Kernel-side feedback loop movement is not claimed unless tested
+on a patched kernel.
