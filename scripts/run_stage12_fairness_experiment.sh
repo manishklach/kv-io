@@ -256,28 +256,28 @@ summary_csv="$RESULTS_DIR/summary.csv"
   printf "kairo_write_fairness_demotions_delta\n"
 
   for case in "${CASES[@]}"; do
-    local sl="$RESULTS_DIR/$case/summary.log"
+    sl="$RESULTS_DIR/$case/summary.log"
     if [[ ! -f "$sl" ]]; then
       continue
     fi
 
     # Extract values from summary.log
-    local models="$(grep -E "^models=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
-    local sessions="$(grep -E "^sessions=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
-    local decode_p99="$(grep -E "^decode_p99_us=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
-    local decode_p95="$(grep -E "^decode_p95_us=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
-    local decode_avg="$(grep -E "^decode_avg_us=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
-    local write_mbps="$(grep -E "^write_MBps=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
-    local prefetch_mbps="$(grep -E "^prefetch_read_MBps=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
+    models="$(grep -E "^models=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
+    sessions="$(grep -E "^sessions=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
+    decode_p99="$(grep -E "^decode_p99_us=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
+    decode_p95="$(grep -E "^decode_p95_us=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
+    decode_avg="$(grep -E "^decode_avg_us=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
+    write_mbps="$(grep -E "^write_MBps=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
+    prefetch_mbps="$(grep -E "^prefetch_read_MBps=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
 
     # Counter deltas
-    local refills_delta="$(grep -E "^kairo_fairness_refills_delta=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
-    local model_thr_delta="$(grep -E "^kairo_fairness_model_throttles_delta=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
-    local session_thr_delta="$(grep -E "^kairo_fairness_session_throttles_delta=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
-    local noisy_events_delta="$(grep -E "^kairo_noisy_session_events_delta=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
-    local protected_delta="$(grep -E "^kairo_protected_decode_dispatches_delta=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
-    local prefetch_thr_delta="$(grep -E "^kairo_prefetch_fairness_throttles_delta=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
-    local write_dem_delta="$(grep -E "^kairo_write_fairness_demotions_delta=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
+    refills_delta="$(grep -E "^kairo_fairness_refills_delta=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
+    model_thr_delta="$(grep -E "^kairo_fairness_model_throttles_delta=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
+    session_thr_delta="$(grep -E "^kairo_fairness_session_throttles_delta=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
+    noisy_events_delta="$(grep -E "^kairo_noisy_session_events_delta=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
+    protected_delta="$(grep -E "^kairo_protected_decode_dispatches_delta=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
+    prefetch_thr_delta="$(grep -E "^kairo_prefetch_fairness_throttles_delta=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
+    write_dem_delta="$(grep -E "^kairo_write_fairness_demotions_delta=" "$sl" 2>/dev/null | head -1 | cut -d= -f2)"
 
     # Defaults
     : "${models:=NA}" "${sessions:=NA}" "${decode_p99:=NA}" "${decode_p95:=NA}"
@@ -287,9 +287,9 @@ summary_csv="$RESULTS_DIR/summary.csv"
     : "${prefetch_thr_delta:=NA}" "${write_dem_delta:=NA}"
 
     # Determine noisy params from case name
-    local noisy_model="0"
-    local noisy_session="0"
-    local noisy_multiplier="0"
+    noisy_model="0"
+    noisy_session="0"
+    noisy_multiplier="0"
     case "$case" in
       02-noisy-session-*) noisy_session=1; noisy_multiplier=5 ;;
       03-noisy-session-*) noisy_session=1; noisy_multiplier=5 ;;
