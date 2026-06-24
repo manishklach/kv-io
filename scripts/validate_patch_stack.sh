@@ -634,6 +634,50 @@ grep -qF "kairo_blkg_decode_dispatches" "$REPO_ROOT/scripts/collect_kairo_counte
 grep -qF "stage16_dryrun" "$REPO_ROOT/scripts/run_wsl_validation_snapshot.sh" || \
   fail "Stage 16: run_wsl_validation_snapshot.sh missing stage16_dryrun"
 
+# Stage 17: verify io_uring KV region hint scaffold
+stage17_has_pattern() {
+  local file="$1" pattern="$2"
+  grep -qF -- "$pattern" "$file" || fail "Stage 17: missing pattern '$pattern' in $(basename "$file")"
+}
+
+stage17_file_exists() {
+  [[ -f "$1" ]] || fail "Stage 17: missing file: $1"
+}
+
+P27="$PATCH_DIR/0027-rfc-kairo-io-uring-kv-region-hints.patch"
+DOC17="$REPO_ROOT/docs/stage17_io_uring_kv_region_hints.md"
+R17SE="$REPO_ROOT/scripts/run_stage17_io_uring_region_experiment.sh"
+P17SP="$REPO_ROOT/scripts/parse_stage17_io_uring_region_summary.py"
+AUDIT_IOU="$REPO_ROOT/kernel/integration/linux-6.8/audit_io_uring_hooks.sh"
+
+stage17_file_exists "$P27"
+stage17_file_exists "$DOC17"
+stage17_file_exists "$R17SE"
+stage17_file_exists "$P17SP"
+stage17_file_exists "$AUDIT_IOU"
+stage17_has_pattern "$P27" "struct kairo_kv_region_hint"
+stage17_has_pattern "$P27" "kairo_apply_kv_region_hint"
+stage17_has_pattern "$P27" "kairo_request_has_kv_region"
+stage17_has_pattern "$DOC17" "io_uring KV Region Hints"
+stage17_has_pattern "$R17SE" "results/stage17"
+stage17_has_pattern "$R17SE" "block-device"
+stage17_has_pattern "$P17SP" "--csv"
+stage17_has_pattern "$P17SP" "--pretty"
+stage17_has_pattern "$AUDIT_IOU" "io_init_req"
+stage17_has_pattern "$AUDIT_IOU" "io_issue_sqe"
+
+# Verify include/kairo_hints.h has KV region structs
+grep -qF "struct kairo_user_kv_region_hint" "$REPO_ROOT/include/kairo_hints.h" || \
+  fail "Stage 17: kairo_hints.h missing struct kairo_user_kv_region_hint"
+
+# Verify bench/kairo_bench.c supports --kv-region-type
+grep -qF "kv-region-type" "$REPO_ROOT/bench/kairo_bench.c" || \
+  fail "Stage 17: kairo_bench.c missing --kv-region-type"
+
+# Verify WSL validation includes stage17_dryrun
+grep -qF "stage17_dryrun" "$REPO_ROOT/scripts/run_wsl_validation_snapshot.sh" || \
+  fail "Stage 17: run_wsl_validation_snapshot.sh missing stage17_dryrun"
+
 # Stage 9: verify WSL validation files
 [[ -f "$REPO_ROOT/scripts/check_wsl_environment.sh" ]] || fail "Stage 9: missing scripts/check_wsl_environment.sh"
 [[ -f "$REPO_ROOT/scripts/run_wsl_validation_snapshot.sh" ]] || fail "Stage 9: missing scripts/run_wsl_validation_snapshot.sh"

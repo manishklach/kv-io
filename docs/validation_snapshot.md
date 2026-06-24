@@ -1,9 +1,9 @@
 # Kairo Validation Snapshot
 
-Date: 20260624-090426
-Environment: non-WSL or unknown
-Kernel: unknown
-WSL: unknown
+Date: 20260624-091715
+Environment: WSL
+Kernel: 6.6.87.2-microsoft-standard-WSL2+
+WSL: true
 
 ## Summary
 
@@ -12,7 +12,7 @@ WSL: unknown
 | validate_patch_stack | pass |
 | make | pass |
 | fallback_gcc_build | not_needed |
-| benchmark_exists | false |
+| benchmark_exists | true |
 | stage6_dryrun | pass |
 | stage7_dryrun | pass |
 | stage8_dryrun | pass |
@@ -20,6 +20,7 @@ WSL: unknown
 | stage14_dryrun | pass |
 | stage15_dryrun | pass |
 | stage16_dryrun | pass |
+| stage17_dryrun | pass |
 | user_bench_baseline | skipped |
 | user_bench_mixed | skipped |
 
@@ -50,9 +51,10 @@ WSL: unknown
 - stage14_dryrun.log
 - stage15_dryrun.log
 - stage16_dryrun.log
+- stage17_dryrun.log
 - user_bench_baseline.log
 - user_bench_mixed.log
 
-Results directory: `/mnt/c/Users/ManishKL/Documents/Playground/kv-io/results/validation/20260624-090426`
+Results directory: `/mnt/c/Users/ManishKL/Documents/Playground/kv-io/results/validation/20260624-091715`
 
 Notes: WSL validation only; no custom kernel boot, no Kairo sysfs counters, no physical NVMe placement validation.

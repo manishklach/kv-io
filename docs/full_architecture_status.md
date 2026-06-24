@@ -26,6 +26,7 @@
 | controller feedback wiring | `0024` | conceptual | Wires decode latency observations into the Stage 10 adaptive controller; timestamp metadata in request hints; classify/dispatch time recording; missing timestamp handling; histogram-based controller update; 5 feedback counters; 5 canonical experiment cases; `kairo_controller_sample` tracepoint (documented only) |
 | fairness accounting and sysfs wiring | `0025` | conceptual | Wires Stage 12 fairness counters into sysfs boilerplate with DD_RO_ATTR macros; adds show/store for 5 tunables with bounds checking; adds show for 7 counters; counters wired into fairness hooks as event observations; LINUX-6.8-CHECK annotations |
 | blk-cgroup AI I/O controller | `0026` | conceptual | blk-cgroup policy scaffold mapping Kairo request classes to cgroup-level I/O budgets; `enum kairo_blkg_policy_class`, `struct kairo_blkg_policy`, `struct kairo_blkg_stats`; 5 conceptual hooks; blkcg audit script; cgroup interface files documented only |
+| io_uring KV region hints | `0027` | conceptual | io_uring KV region hint scaffold modeling AI runtime memory regions as registered buffer/file tags; `enum kairo_kv_region_type`, `struct kairo_kv_region_hint`; 2 conceptual hooks; io_uring audit script; user-space region hint structs and benchmark flags |
 
 ## Stage 6.5 Status
 
@@ -220,6 +221,21 @@
 | Summary parser | implemented | `parse_stage16_blkcg_summary.py` with CSV and pretty-printed output |
 | Counter coverage | updated | `collect_kairo_counters.sh` includes blkcg counters |
 | Stage 16 documentation | implemented | `docs/stage16_blkcg_ai_io_controller.md` |
+
+## Stage 17 Status
+
+| Area | Status | Notes |
+|------|--------|-------|
+| KV region type enum | scaffolded | `enum kairo_kv_region_type` with 6 types in blk-mq.h |
+| Region hint struct | scaffolded | `struct kairo_kv_region_hint` with region_id, type, offset, length, model/session, lifetime, recompute |
+| Conceptual hooks | scaffolded | `kairo_request_has_kv_region()`, `kairo_apply_kv_region_hint()` — both no-ops |
+| io_uring opcodes | defined | `IORING_REGISTER_KAIRO_KV_REGION` (42), `IORING_REGISTER_KAIRO_KV_REGIONS` (43) — no handler |
+| io_uring audit script | implemented | `audit_io_uring_hooks.sh` checks Linux 6.8 for candidate hook points |
+| User-space header | implemented | `kairo_hints.h`: `enum kairo_user_kv_region_type`, `struct kairo_user_kv_region_hint`, flags, name helper |
+| Benchmark KV region flags | implemented | `--kv-region-id`, `--kv-region-type`, `--kv-region-count`, `--kv-region-size`, `--registered-buffer-mode` |
+| Experiment harness | implemented | `run_stage17_io_uring_region_experiment.sh` with five canonical cases |
+| Summary parser | implemented | `parse_stage17_io_uring_region_summary.py` with CSV and pretty-printed output |
+| Stage 17 documentation | implemented | `docs/stage17_io_uring_kv_region_hints.md` |
 
 ## Current Read
 

@@ -454,3 +454,38 @@ framework:
   - multi-cgroup fair scheduling
   - `CONFIG_BLK_CGROUP_KAIRO` Kconfig symbol (does not exist upstream)
   - benchmark `--tenant-id` / `--tenants` / `--tenant-mode` flags (placeholders only)
+
+## Stage 17
+
+- Broad RFC/POC patches involved: `0027`
+- Docs: `docs/stage17_io_uring_kv_region_hints.md`
+- User-space header: `include/kairo_hints.h` (KV region structs, enums, flags)
+- Scripts:
+  - `scripts/run_stage17_io_uring_region_experiment.sh`
+  - `scripts/parse_stage17_io_uring_region_summary.py`
+  - `kernel/integration/linux-6.8/audit_io_uring_hooks.sh`
+- What should compile:
+  - `enum kairo_kv_region_type` with 6 types in `include/linux/blk-mq.h`
+  - `struct kairo_kv_region_hint` with region metadata
+  - conceptual hooks: `kairo_request_has_kv_region`, `kairo_apply_kv_region_hint`
+  - `IORING_REGISTER_KAIRO_KV_REGION` and `IORING_REGISTER_KAIRO_KV_REGIONS` opcodes
+  - io_uring audit script for Linux 6.8 candidate hook points
+  - User-space `enum kairo_user_kv_region_type` and `struct kairo_user_kv_region_hint`
+  - Benchmark `--kv-region-id`, `--kv-region-type`, `--kv-region-count`,
+    `--kv-region-size`, `--registered-buffer-mode` options
+- What should be measurable:
+  - conceptual KV region hint model for AI runtime memory management
+  - five canonical experiment cases covering decode, session, model,
+    recomputable, and many-small regions
+  - structured output under `results/stage17/<timestamp>/`
+  - parseable summary logs with CSV and pretty-printed tables
+  - audit script runs against Linux 6.8 source tree
+  - benchmark output fields: `kv_region_id`, `kv_region_type`, `kv_region_count`,
+    `kv_region_size`, `registered_buffer_mode`
+- What is still RFC-only:
+  - real `IORING_REGISTER_KAIRO_KV_REGION` opcode handler (no handler wired)
+  - kernel region store (no data structure for registered regions)
+  - dispatch-path integration of KV region hints (CONCEPTUAL-HOOK)
+  - io_uring worker in benchmark (uses `pread`/`pwrite`)
+  - real registered-buffer tagging
+  - region-level override of per-request hints

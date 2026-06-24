@@ -217,3 +217,37 @@ interface files are not mounted. Dispatch-path integration of blkcg hooks
 remains CONCEPTUAL-HOOK. Kernel-side blkcg counter movement is not claimed
 unless tested on a patched kernel with `CONFIG_BLK_CGROUP` enabled and
 `CONFIG_BLK_CGROUP_KAIRO` present.
+
+## Stage 17 io_uring KV Region Hints Status
+
+Stage 17 (`0027`) adds a conceptual io_uring KV region hint scaffold:
+
+- **Region type enum**: `enum kairo_kv_region_type` with 6 types
+  (NONE, DECODE_CACHE, PREFETCH_CACHE, SESSION_CACHE, MODEL_CACHE,
+  RECOMPUTABLE_CACHE) in `include/linux/blk-mq.h`
+- **Region hint struct**: `struct kairo_kv_region_hint` with region_id, type,
+  model_id, session_id, file_offset, length, lifetime_class, recompute_ok
+- **Conceptual hooks**: `kairo_request_has_kv_region()` (always returns false),
+  `kairo_apply_kv_region_hint()` (no-op)
+- **io_uring opcodes**: `IORING_REGISTER_KAIRO_KV_REGION` (42) and
+  `IORING_REGISTER_KAIRO_KV_REGIONS` (43) in `include/uapi/linux/io_uring.h`
+  — no handler wired
+- **io_uring audit script**: `kernel/integration/linux-6.8/audit_io_uring_hooks.sh`
+  checks Linux 6.8 for candidate hook points (`io_init_req`, `io_issue_sqe`,
+  `io_read`, `io_write`, etc.)
+- **User-space header**: `include/kairo_hints.h` with `enum kairo_user_kv_region_type`,
+  `struct kairo_user_kv_region_hint`, `KAIRO_USER_KV_REGION_*` flags, and
+  `kairo_user_kv_region_type_name()` helper
+- **Benchmark flags**: `--kv-region-id`, `--kv-region-type`, `--kv-region-count`,
+  `--kv-region-size`, `--registered-buffer-mode` with output fields
+- **Experiment harness**: `run_stage17_io_uring_region_experiment.sh` with five
+  canonical cases under `results/stage17/<timestamp>/`
+- **Summary parser**: `parse_stage17_io_uring_region_summary.py` with CSV and
+  pretty-printed output
+
+Stage 17 is **not** foundation-integrated, **not** LKML-ready, and **not**
+boot-validated. The `IORING_REGISTER_KAIRO_KV_REGION` opcode has no handler.
+The kernel region store does not exist. Dispatch-path integration of KV region
+hints remains CONCEPTUAL-HOOK. The benchmark uses `pread`/`pwrite`, not io_uring.
+Kernel-side KV region hint application is not claimed unless tested on a patched
+kernel with io_uring KV region registration.

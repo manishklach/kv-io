@@ -86,6 +86,11 @@ struct kairo_config {
     unsigned int noisy_session;
     unsigned int noisy_model;
     unsigned int noisy_multiplier;
+    unsigned int kv_region_id;
+    unsigned int kv_region_type;
+    unsigned int kv_region_count;
+    uint64_t kv_region_size;
+    const char *registered_buffer_mode;
 };
 
 struct kairo_stats {
@@ -370,6 +375,22 @@ kairo_compute_backend_model(const struct kairo_config *cfg)
     return m;
 }
 
+static uint32_t parse_kv_region_type(const char *value)
+{
+    if (strcmp(value, "decode") == 0)
+        return KAIRO_USER_KV_REGION_DECODE_CACHE;
+    if (strcmp(value, "prefetch") == 0)
+        return KAIRO_USER_KV_REGION_PREFETCH_CACHE;
+    if (strcmp(value, "session") == 0)
+        return KAIRO_USER_KV_REGION_SESSION_CACHE;
+    if (strcmp(value, "model") == 0)
+        return KAIRO_USER_KV_REGION_MODEL_CACHE;
+    if (strcmp(value, "recomputable") == 0)
+        return KAIRO_USER_KV_REGION_RECOMPUTABLE_CACHE;
+    fprintf(stderr, "warning: unknown kv-region-type '%s', using none\n", value);
+    return KAIRO_USER_KV_REGION_NONE;
+}
+
 static uint32_t parse_lifetime(const char *value)
 {
     if (strcmp(value, "short") == 0)
@@ -425,10 +446,15 @@ static void usage(const char *prog)
             "  --random-read             Default mode\n"
             "  --sequential-read         Disable random read placement\n"
             "  --buffered                Disable O_DIRECT\n"
-            "  --noisy-session <n>       Session ID for noise stress test\n"
-            "  --noisy-model <n>         Model ID for noise stress test\n"
-            "  --noisy-multiplier <n>    Traffic multiplier for noisy entity\n",
-            prog);
+             "  --noisy-session <n>       Session ID for noise stress test\n"
+             "  --noisy-model <n>         Model ID for noise stress test\n"
+             "  --noisy-multiplier <n>    Traffic multiplier for noisy entity\n"
+             "  --kv-region-id <n>        KV region ID (default: 0)\n"
+             "  --kv-region-type <name>   decode|prefetch|session|model|recomputable\n"
+             "  --kv-region-count <n>     Number of KV regions (default: 1)\n"
+             "  --kv-region-size <B|K|M>  KV region size (default: 4M)\n"
+             "  --registered-buffer-mode <m> none|model|mock\n",
+             prog);
 }
 
 static uint64_t parse_size(const char *value, const char *name)
@@ -584,6 +610,11 @@ static void set_defaults(struct kairo_config *cfg)
     cfg->lifetime_class = KAIRO_USER_LIFE_NONE;
     cfg->recompute_ok = false;
     cfg->backend_mode = KAIRO_BACKEND_MODE_NONE;
+    cfg->kv_region_id = 0;
+    cfg->kv_region_type = KAIRO_USER_KV_REGION_NONE;
+    cfg->kv_region_count = 1;
+    cfg->kv_region_size = 4UL * 1024 * 1024;
+    cfg->registered_buffer_mode = "none";
 }
 
 static void apply_mode_defaults(struct kairo_config *cfg)
@@ -1317,6 +1348,12 @@ static void print_summary(const struct kairo_config *cfg, const struct kairo_sta
     printf("noisy_multiplier=%u\n", cfg->noisy_multiplier);
     printf("fairness_mode=%s\n",
            cfg->noisy_session > 0 || cfg->noisy_model > 0 ? "stress" : "none");
+    printf("kv_region_id=%u\n", cfg->kv_region_id);
+    printf("kv_region_type=%s\n",
+           kairo_user_kv_region_type_name(cfg->kv_region_type));
+    printf("kv_region_count=%u\n", cfg->kv_region_count);
+    printf("kv_region_size=%" PRIu64 "\n", cfg->kv_region_size);
+    printf("registered_buffer_mode=%s\n", cfg->registered_buffer_mode);
     {
         struct kairo_backend_model m = kairo_compute_backend_model(cfg);
         printf("backend_mode=%s\n", kairo_backend_mode_name(cfg->backend_mode));
@@ -1434,6 +1471,11 @@ int main(int argc, char **argv)
         {"noisy-session", required_argument, NULL, 18},
         {"noisy-model", required_argument, NULL, 19},
         {"noisy-multiplier", required_argument, NULL, 20},
+        {"kv-region-id", required_argument, NULL, 21},
+        {"kv-region-type", required_argument, NULL, 22},
+        {"kv-region-count", required_argument, NULL, 23},
+        {"kv-region-size", required_argument, NULL, 24},
+        {"registered-buffer-mode", required_argument, NULL, 25},
         {"random-read", no_argument, NULL, 1},
         {"sequential-read", no_argument, NULL, 2},
         {"buffered", no_argument, NULL, 3},
@@ -1532,6 +1574,21 @@ int main(int argc, char **argv)
             break;
         case 20:
             cfg.noisy_multiplier = (unsigned int)parse_size(optarg, "noisy-multiplier");
+            break;
+        case 21:
+            cfg.kv_region_id = (unsigned int)parse_size(optarg, "kv-region-id");
+            break;
+        case 22:
+            cfg.kv_region_type = parse_kv_region_type(optarg);
+            break;
+        case 23:
+            cfg.kv_region_count = (unsigned int)parse_size(optarg, "kv-region-count");
+            break;
+        case 24:
+            cfg.kv_region_size = parse_size(optarg, "kv-region-size");
+            break;
+        case 25:
+            cfg.registered_buffer_mode = optarg;
             break;
         case 4:
             cfg.stride_blocks = (unsigned int)parse_size(optarg, "stride-blocks");

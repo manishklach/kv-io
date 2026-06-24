@@ -141,4 +141,54 @@ static inline const char *kairo_backend_mode_name(enum kairo_backend_mode mode)
     }
 }
 
+/*
+ * Stage 17: io_uring KV region hint types (benchmark-only modeling)
+ *
+ * These mirror the kernel-side enum kairo_kv_region_type for use by
+ * the user-space benchmark.  They are not part of any stable UAPI.
+ */
+enum kairo_user_kv_region_type {
+    KAIRO_USER_KV_REGION_NONE = 0,
+    KAIRO_USER_KV_REGION_DECODE_CACHE,
+    KAIRO_USER_KV_REGION_PREFETCH_CACHE,
+    KAIRO_USER_KV_REGION_SESSION_CACHE,
+    KAIRO_USER_KV_REGION_MODEL_CACHE,
+    KAIRO_USER_KV_REGION_RECOMPUTABLE_CACHE,
+};
+
+/* KV region hint flags */
+#define KAIRO_USER_KV_REGION_RECOMPUTE_OK      (1U << 0)
+#define KAIRO_USER_KV_REGION_REGISTERED_BUFFER (1U << 1)
+#define KAIRO_USER_KV_REGION_FIXED_FILE        (1U << 2)
+
+struct kairo_user_kv_region_hint {
+    uint32_t region_id;
+    uint32_t region_type;
+    uint32_t model_id;
+    uint32_t session_id;
+    uint64_t file_offset;
+    uint64_t length;
+    uint32_t lifetime_class;
+    uint32_t flags;
+};
+
+static inline const char *kairo_user_kv_region_type_name(uint32_t region_type)
+{
+    switch (region_type) {
+    case KAIRO_USER_KV_REGION_DECODE_CACHE:
+        return "decode";
+    case KAIRO_USER_KV_REGION_PREFETCH_CACHE:
+        return "prefetch";
+    case KAIRO_USER_KV_REGION_SESSION_CACHE:
+        return "session";
+    case KAIRO_USER_KV_REGION_MODEL_CACHE:
+        return "model";
+    case KAIRO_USER_KV_REGION_RECOMPUTABLE_CACHE:
+        return "recomputable";
+    case KAIRO_USER_KV_REGION_NONE:
+    default:
+        return "none";
+    }
+}
+
 #endif
