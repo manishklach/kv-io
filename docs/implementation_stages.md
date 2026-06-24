@@ -228,3 +228,35 @@ framework:
   - custom kernel boot validation
   - patched-kernel runtime counters
   - physical NVMe placement claims
+
+## Stage 10
+
+- Broad RFC/POC patches involved: `0018`
+- Docs: `docs/stage10_adaptive_latency_controller.md`
+- Scripts:
+  - `scripts/run_stage10_latency_controller_experiment.sh`
+  - `scripts/parse_stage10_latency_controller_summary.py`
+- What should compile:
+  - `enum kairo_controller_mode` and `struct kairo_latency_controller`
+    in `mq-deadline.c`
+  - controller state init, sample accumulation, p95/p99 computation,
+    budget adjustment logic
+  - sysfs knobs for controller enable, mode, target p99, control window
+  - sysfs counters for controller updates, boost/relax/throttle/release events
+  - integration call site in `dd_dispatch_request()`
+  - decode pressure signal in demotion helpers
+- What should be measurable:
+  - controller counters in sysfs when controller is enabled
+  - `kairo_adaptive_decode_budget` and `kairo_adaptive_prefetch_budget`
+    reflect controller decisions after a window of decode pressure
+  - six canonical experiment cases comparing static vs controller-driven scheduling
+  - structured output under `results/stage10/<timestamp>/`
+  - parseable summary logs with CSV and pretty-printed tables
+- What is still RFC-only:
+  - real decode latency measurement from inside the kernel (completion hook)
+  - controller behavior on real NVMe hardware under true inference patterns
+  - precise p95/p99 latency histogram (uses avg/max heuristic)
+  - timer-based controller update (currently called from dispatch path)
+  - `kairo_controller_update` tracepoint (documented but not wired)
+  - interaction with BPF dispatch hook (patch 0016)
+  - per-device budget tracking (currently updates global variables)

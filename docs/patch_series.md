@@ -30,6 +30,7 @@ local apply/build target for Stage 1 and Stage 2 validation.
 | `0015` | merge | `blk-merge` | Real merge bias implementation filling in the empty body from 0004; `kairo_attempt_forced_merge()` with safety checks |
 | `0016` | BPF hook | `bpf`, `mq-deadline` | BPF_PROG_TYPE_KAIRO_SCHED for programmable I/O dispatch arbitration; additive fallback to static logic |
 | `0017` | tracepoints | `block/blk-mq`, `block/mq-deadline`, `block/blk-merge`, `drivers/nvme/host` | RFC/POC Kairo tracepoint scaffold: 9 TRACE_EVENT definitions in `include/trace/events/kairo.h`; conceptual call sites across block and NVMe layers; bpftrace scripts; trace experiment harness; trace log parser |
+| `0018` | adaptive latency controller | `block/mq-deadline` | Adjusts decode and prefetch budgets based on observed decode p99 tail latency; three modes (OFF/OBSERVE/ADAPTIVE); sysfs knobs and counters; six canonical experiment cases |
 
 ## Design Themes
 

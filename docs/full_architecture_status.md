@@ -19,6 +19,7 @@
 | io_uring SQE hint | `0014` | implemented | IORING_SQE_KAIRO_CLASS for per-IO classification |
 | real merge bias | `0015` | implemented | kairo_attempt_forced_merge() with safety checks; fills empty body from 0004 |
 | BPF dispatch hook | `0016` | conceptual | BPF_PROG_TYPE_KAIRO_SCHED for programmable I/O scheduling |
+| adaptive latency controller | `0018` | conceptual | Adjusts decode/prefetch budgets based on observed decode p99 latency; sysfs knobs and counters; six canonical experiment cases |
 
 ## Stage 6.5 Status
 
@@ -85,6 +86,27 @@
 | Hook-point audit script | implemented | `kernel/integration/linux-6.8/audit_nvme_hooks.sh` — checks real kernel tree for candidate symbols |
 | Python validator | implemented | `scripts/validate_stage7_backend_mapping.py` — checks 0008, docs, benchmark for required patterns |
 | Validator integration | implemented | `validate_patch_stack.sh` calls Python validator and checks Stage 7.5 files |
+
+## Stage 10 Status
+
+| Area | Status | Notes |
+|------|--------|-------|
+| Controller data structure | implemented | `enum kairo_controller_mode`, `struct kairo_latency_controller` in mq-deadline.c |
+| Controller init/update logic | implemented | `dd_kairo_controller_init()`, `dd_kairo_controller_update()`, `dd_kairo_controller_apply()` |
+| Decode latency sampling | conceptual | `dd_kairo_controller_note_decode_latency()` defined but no call site wired |
+| p95/p99 computation | conceptual | Coarse avg/max heuristic; real implementation needs exponential latency buckets |
+| Budget adjustment policy | implemented | Boost/relax decode budget, throttle/restore prefetch based on decode p99 vs target |
+| Write demotion pressure signal | conceptual | `controller_release_write_events` counter tracks pressure; demotion helpers reference controller state |
+| Controller sysfs knobs | implemented | `kairo_controller_enable`, `kairo_controller_mode`, `kairo_target_decode_p99_us`, `kairo_control_window_ms` |
+| Controller sysfs counters | implemented | `kairo_controller_updates`, `kairo_controller_*_events`, `kairo_controller_insufficient_samples` |
+| Controller observed state | implemented | `kairo_observed_decode_p99_us`, `kairo_observed_decode_p95_us`, `kairo_observed_decode_avg_us`, `kairo_adaptive_decode_budget`, `kairo_adaptive_prefetch_budget` |
+| Demotion pressure integration | conceptual | `dd_kairo_should_demote_prefill/evict` reference controller decode pressure signal |
+| Controller update call site | implemented | Call in `dd_dispatch_request()` after kairo_enable check |
+| Controller update tracepoint | documented | `kairo_controller_update` TRACE_EVENT described in 0018 but not wired; add to patch 0017 after validation |
+| Experiment harness | implemented | `run_stage10_latency_controller_experiment.sh` with six canonical cases, structured output, counter collection |
+| Summary parser | implemented | `parse_stage10_latency_controller_summary.py` with CSV and pretty-printed output, counter delta columns |
+| Counter coverage | updated | `collect_kairo_counters.sh` includes Stage 10 controller counters |
+| Stage 10 documentation | implemented | `docs/stage10_adaptive_latency_controller.md` |
 
 ## Stage 9 Status
 

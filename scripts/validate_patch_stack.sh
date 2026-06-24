@@ -322,6 +322,53 @@ stage8_has_pattern "$BT_LATENCY" "kairo_decode_dispatch"
 stage8_has_pattern "$BT_DISPATCH" "kairo_scheduler_decision"
 stage8_has_pattern "$BT_BACKEND" "kairo_backend_mapped"
 
+# Stage 10: verify adaptive latency controller
+stage10_has_pattern() {
+  local file="$1" pattern="$2"
+  grep -qF -- "$pattern" "$file" || fail "Stage 10: missing pattern '$pattern' in $(basename "$file")"
+}
+
+stage10_file_exists() {
+  [[ -f "$1" ]] || fail "Stage 10: missing file: $1"
+}
+
+P18="$PATCH_DIR/0018-rfc-kairo-adaptive-latency-controller.patch"
+DOC10="$REPO_ROOT/docs/stage10_adaptive_latency_controller.md"
+R10SE="$REPO_ROOT/scripts/run_stage10_latency_controller_experiment.sh"
+P10SP="$REPO_ROOT/scripts/parse_stage10_latency_controller_summary.py"
+
+stage10_file_exists "$P18"
+stage10_file_exists "$DOC10"
+stage10_file_exists "$R10SE"
+stage10_file_exists "$P10SP"
+stage10_has_pattern "$P18" "enum kairo_controller_mode"
+stage10_has_pattern "$P18" "struct kairo_latency_controller"
+stage10_has_pattern "$P18" "kairo_target_decode_p99_us"
+stage10_has_pattern "$P18" "adaptive_decode_budget"
+stage10_has_pattern "$P18" "adaptive_prefetch_budget"
+stage10_has_pattern "$P18" "controller_updates"
+stage10_has_pattern "$P18" "controller_boost_events"
+stage10_has_pattern "$P18" "controller_relax_events"
+stage10_has_pattern "$P18" "controller_throttle_prefetch_events"
+stage10_has_pattern "$P18" "controller_release_write_events"
+stage10_has_pattern "$P18" "controller_insufficient_samples"
+stage10_has_pattern "$DOC10" "adaptive scheduling controller"
+stage10_has_pattern "$R10SE" "results/stage10"
+stage10_has_pattern "$R10SE" "block-device"
+stage10_has_pattern "$R10SE" "controller-adaptive"
+stage10_has_pattern "$P10SP" "--csv"
+stage10_has_pattern "$P10SP" "--pretty"
+stage10_has_pattern "$P10SP" "kairo_controller_updates_delta"
+
+# Verify collect_kairo_counters.sh includes controller counters
+grep -qF "kairo_controller_updates" "$REPO_ROOT/scripts/collect_kairo_counters.sh" || \
+  fail "Stage 10: collect_kairo_counters.sh missing kairo_controller_updates"
+grep -qF "kairo_controller_boost_events" "$REPO_ROOT/scripts/collect_kairo_counters.sh" || \
+  fail "Stage 10: collect_kairo_counters.sh missing kairo_controller_boost_events"
+
+# Verify docs reference Stage 10
+grep -qF "Stage 10" "$DOC10" || fail "Stage 10: doc missing 'Stage 10' reference"
+
 # Stage 9: verify WSL validation files
 [[ -f "$REPO_ROOT/scripts/check_wsl_environment.sh" ]] || fail "Stage 9: missing scripts/check_wsl_environment.sh"
 [[ -f "$REPO_ROOT/scripts/run_wsl_validation_snapshot.sh" ]] || fail "Stage 9: missing scripts/run_wsl_validation_snapshot.sh"

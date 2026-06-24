@@ -109,6 +109,14 @@ counter_names=(
   kairo_backend_model_local
   kairo_backend_recomputable
   kairo_backend_persistent
+
+  # Stage 10: adaptive latency controller counters
+  kairo_controller_updates
+  kairo_controller_boost_events
+  kairo_controller_relax_events
+  kairo_controller_prefetch_throttles
+  kairo_controller_write_releases
+  kairo_controller_insufficient_samples
 )
 
 for name in "${counter_names[@]}"; do

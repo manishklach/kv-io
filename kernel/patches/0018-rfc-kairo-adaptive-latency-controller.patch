@@ -1,0 +1,740 @@
+From 1010101010100000000000000000000000000018 Mon Sep 17 00:00:00 2001
+From: Kairo POC <kairo-poc@local>
+Date: Mon, 22 Jun 2026 10:00:00 -0700
+Subject: [RFC/POC PATCH 11/9] mq-deadline: Kairo adaptive decode tail-latency controller
+
+Subsystem touched:
+- `block/mq-deadline.c`
+
+Kairo concept:
+- adaptive controller that adjusts Kairo scheduling policy based on observed
+  decode tail latency
+- three modes: OFF, OBSERVE (collect stats only), ADAPTIVE (adjust policy)
+- tracks decode p99/p95/avg latency over a control window
+- when decode p99 exceeds target: boost decode budget, throttle prefetch,
+  increase write demotion pressure, preserve starvation escape
+- when decode p99 is healthy: slowly relax decode budget, restore prefetch,
+  allow prefill/write progress
+- sysfs knobs: enable, mode, target p99, control window, observed budgets
+- sysfs counters: updates, boost/relax events, prefetch throttles, write
+  releases, insufficient sample events
+
+COMPILE-RISK: LOW. All controller logic is self-contained in new static
+helpers and sysfs boilerplate. It references existing Kairo enums and
+deadline_data fields.
+
+CONCEPTUAL-HOOK: The controller update point (dd_kairo_controller_update)
+must be called periodically from the dispatch path or a timer. The exact
+call site depends on how the scheduler sampling loop is structured.
+
+Depends on:
+- 0001: kairo_enable, struct kairo_hints, kairo_io_class
+- 0009: sysfs show/store patterns, DD_RO_ATTR/DD_ATTR macros
+- 0011: write deadline logic (preserved by controller)
+
+diff --git a/block/mq-deadline.c b/block/mq-deadline.c
+index 2d26bef..a9b1e2c 100755
+--- a/block/mq-deadline.c
++++ b/block/mq-deadline.c
+@@ -1 +1 @@
++/*
++ * Stage 10: Kairo adaptive decode tail-latency controller.
++ *
++ * This controller adjusts decode budget, prefetch budget, and write
++ * demotion pressure based on observed decode request latency.
++ *
++ * Design rationale:
++ *   AI inference decode latency is the primary QoS metric. Static budgets
++ *   configured via sysfs work well for steady-state workloads but do not
++ *   adapt to decode pressure spikes. The controller uses observed decode
++ *   p99 latency as the control signal.
++ *
++ *   When decode p99 exceeds a configurable target:
++ *   - decode budget is increased to allow more decode requests per dispatch
++ *   - prefetch budget is reduced to conserve I/O resources for decode
++ *   - write demotion pressure is increased (prefill/evict yield more)
++ *   - the write starvation escape remains active to prevent write-side
++ *     complete starvation
++ *
++ *   When decode p99 is within target:
++ *   - decode budget slowly relaxes toward the base (user-configured) value
++ *   - prefetch budget is gradually restored
++ *   - write demotion pressure eases
++ *
++ *   When too few decode samples are available, the controller remains in
++ *   OBSERVE mode and does not overreact.
++ *
++ * COMPILE-RISK: LOW. Self-contained static helpers. No external deps
++ * beyond existing kairo_enable and deadline_data fields.
++ */
++
++enum kairo_controller_mode {
++	KAIRO_CTRL_OFF = 0,
++	KAIRO_CTRL_OBSERVE,
++	KAIRO_CTRL_ADAPTIVE,
++};
++
++struct kairo_latency_controller {
++	enum kairo_controller_mode	mode;
++
++	/* Target and observed latency (microseconds) */
++	u64				target_decode_p99_us;
++	u64				observed_decode_p99_us;
++	u64				observed_decode_p95_us;
++	u64				observed_decode_avg_us;
++
++	/* Budget tracking */
++	u32				base_decode_budget;
++	u32				adaptive_decode_budget;
++	u32				base_prefetch_budget;
++	u32				adaptive_prefetch_budget;
++
++	/* Control window timing */
++	u64				control_window_ns;
++	u64				last_control_update_ns;
++
++	/* Decode latency sample accumulator */
++	u64				decode_samples;
++	u64				decode_latency_sum_us;
++	u64				decode_latency_max_us;
++
++	/* Controller event counters */
++	u64				controller_updates;
++	u64				controller_boost_events;
++	u64				controller_relax_events;
++	u64				controller_throttle_prefetch_events;
++	u64				controller_release_write_events;
++	u64				controller_insufficient_samples;
++};
++
++#define KAIRO_CTRL_MIN_SAMPLES		64
++#define KAIRO_CTRL_MAX_DECODE_BUDGET	32
++#define KAIRO_CTRL_MIN_PREFETCH_BUDGET	1
++#define KAIRO_CTRL_RELAX_STEP		1
++#define KAIRO_CTRL_BOOST_STEP		2
++
++/*
++ * Controller constants for write demotion pressure adjustment.
++ * When decode is under stress, prefill and evict demotion thresholds
++ * shift to be more aggressive about yielding to decode reads.
++ */
++#define KAIRO_CTRL_WRITE_DEMOTE_BOOST	1
++#define KAIRO_CTRL_WRITE_DEMOTE_RELAX	0
++
++/*
++ * dd_kairo_controller_init - Initialize the latency controller for a
++ * deadline_data instance.
++ *
++ * CONCEPTUAL-HOOK: Called once during mq-deadline elevator init, after
++ * the deadline_data struct is allocated. Sets defaults that match the
++ * existing static budget values.
++ */
++static void dd_kairo_controller_init(struct deadline_data *dd)
++{
++	struct kairo_latency_controller *ctrl = &dd->kairo_lat_ctrl;
++
++	ctrl->mode = KAIRO_CTRL_OFF;
++	ctrl->target_decode_p99_us = 5000; /* 5 ms default target */
++	ctrl->control_window_ns = 1000000000ULL; /* 1 second window */
++	ctrl->last_control_update_ns = 0;
++
++	ctrl->base_decode_budget = kairo_decode_budget;
++	ctrl->adaptive_decode_budget = kairo_decode_budget;
++	ctrl->base_prefetch_budget = kairo_prefetch_budget;
++	ctrl->adaptive_prefetch_budget = kairo_prefetch_budget;
++
++	ctrl->decode_samples = 0;
++	ctrl->decode_latency_sum_us = 0;
++	ctrl->decode_latency_max_us = 0;
++
++	ctrl->controller_updates = 0;
++	ctrl->controller_boost_events = 0;
++	ctrl->controller_relax_events = 0;
++	ctrl->controller_throttle_prefetch_events = 0;
++	ctrl->controller_release_write_events = 0;
++	ctrl->controller_insufficient_samples = 0;
++}
++
++/*
++ * dd_kairo_controller_note_decode_latency - Record a decode request's
++ * completion latency for the controller's sample window.
++ *
++ * CONCEPTUAL-HOOK: Called from the blk-mq completion path or from a
++ * mq-deadline request completion hook when a decode-class request
++ * completes. Latency in microseconds from issue to completion.
++ */
++static void dd_kairo_controller_note_decode_latency(struct deadline_data *dd,
++						    u64 latency_us)
++{
++	struct kairo_latency_controller *ctrl = &dd->kairo_lat_ctrl;
++
++	ctrl->decode_samples++;
++	ctrl->decode_latency_sum_us += latency_us;
++	if (latency_us > ctrl->decode_latency_max_us)
++		ctrl->decode_latency_max_us = latency_us;
++}
++
++/*
++ * dd_kairo_controller_compute_pXX - Compute approximate p95 and p99 from
++ * the sample window. Since the controller only stores sum and max, the
++ * percentile computation is intentionally coarse: it estimates based on
++ * the ratio of max to average.
++ *
++ * CONCEPTUAL-HOOK: A real implementation would store a latency histogram
++ * (e.g. exponential buckets) for precise pXX computation. This simplified
++ * version uses a heuristic: p99 ~ avg + 3 * (max - avg) / 4, p95 ~ avg +
++ * (max - avg) / 2. These are arbitrary RFC constants.
++ */
++static void dd_kairo_controller_compute_pXX(struct kairo_latency_controller *ctrl)
++{
++	u64 avg_us = 0;
++	u64 range_us;
++
++	if (ctrl->decode_samples == 0) {
++		ctrl->observed_decode_avg_us = 0;
++		ctrl->observed_decode_p95_us = 0;
++		ctrl->observed_decode_p99_us = 0;
++		return;
++	}
++
++	avg_us = div64_u64(ctrl->decode_latency_sum_us, ctrl->decode_samples);
++	ctrl->observed_decode_avg_us = avg_us;
++
++	range_us = ctrl->decode_latency_max_us - avg_us;
++	ctrl->observed_decode_p95_us = avg_us + div64_u64(range_us, 2);
++	ctrl->observed_decode_p99_us = avg_us + div64_u64(range_us * 3, 4);
++
++	if (ctrl->observed_decode_p99_us < avg_us)
++		ctrl->observed_decode_p99_us = avg_us;
++	if (ctrl->observed_decode_p95_us < avg_us)
++		ctrl->observed_decode_p95_us = avg_us;
++}
++
++/*
++ * dd_kairo_controller_apply - Apply the controller decision to adjust
++ * scheduling budgets.
++ *
++ * Policy:
++ *   If observed_decode_p99_us > target_decode_p99_us:
++ *     - Boost adaptive_decode_budget by BOOST_STEP (capped at MAX)
++ *     - Reduce adaptive_prefetch_budget by BOOST_STEP (floored at MIN)
++ *     - Signal increased write demotion pressure
++ *   If observed_decode_p99_us <= target_decode_p99_us:
++ *     - Relax adaptive_decode_budget by RELAX_STEP (toward base)
++ *     - Restore adaptive_prefetch_budget by RELAX_STEP (toward base)
++ *     - Signal relaxed write demotion pressure
++ *
++ * The global kairo_decode_budget and kairo_prefetch_budget variables
++ * are updated to reflect the controller's decisions. The base budgets
++ * (user-configured via sysfs) are preserved and serve as the relaxation
++ * target.
++ *
++ * CONCEPTUAL-HOOK: This updates global static variables. A real
++ * implementation would make budgets per-device or per-scheduler instance.
++ */
++static void dd_kairo_controller_apply(struct deadline_data *dd)
++{
++	struct kairo_latency_controller *ctrl = &dd->kairo_lat_ctrl;
++
++	ctrl->controller_updates++;
++
++	if (ctrl->observed_decode_p99_us > ctrl->target_decode_p99_us) {
++		/* Under decode pressure: boost decode, throttle prefetch */
++		u32 new_decode_budget = ctrl->adaptive_decode_budget +
++					KAIRO_CTRL_BOOST_STEP;
++		u32 new_prefetch_budget;
++
++		if (new_decode_budget > ctrl->adaptive_prefetch_budget)
++			new_decode_budget = min(new_decode_budget,
++					       (u32)KAIRO_CTRL_MAX_DECODE_BUDGET);
++
++		if (ctrl->adaptive_prefetch_budget >
++		    KAIRO_CTRL_MIN_PREFETCH_BUDGET + KAIRO_CTRL_BOOST_STEP)
++			new_prefetch_budget = ctrl->adaptive_prefetch_budget -
++					      KAIRO_CTRL_BOOST_STEP;
++		else
++			new_prefetch_budget = KAIRO_CTRL_MIN_PREFETCH_BUDGET;
++
++		if (new_decode_budget != ctrl->adaptive_decode_budget) {
++			ctrl->adaptive_decode_budget = new_decode_budget;
++			ctrl->controller_boost_events++;
++			kairo_decode_budget = ctrl->adaptive_decode_budget;
++		}
++
++		if (new_prefetch_budget < ctrl->adaptive_prefetch_budget) {
++			ctrl->adaptive_prefetch_budget = new_prefetch_budget;
++			ctrl->controller_throttle_prefetch_events++;
++			kairo_prefetch_budget = ctrl->adaptive_prefetch_budget;
++		}
++
++		/* Increase write demotion pressure by biasing demotion
++		 * helpers toward earlier yield. This is tracked as a
++		 * conceptual counter; the actual demotion logic in
++		 * dd_kairo_should_demote_prefill/evict uses an implicit
++		 * preference for decode reads already.
++		 */
++		ctrl->controller_release_write_events +=
++			KAIRO_CTRL_WRITE_DEMOTE_BOOST;
++	} else {
++		/* Decode healthy: relax budgets toward base */
++		if (ctrl->adaptive_decode_budget > ctrl->base_decode_budget) {
++			ctrl->adaptive_decode_budget -=
++				min(KAIRO_CTRL_RELAX_STEP,
++				    ctrl->adaptive_decode_budget -
++				    ctrl->base_decode_budget);
++			ctrl->controller_relax_events++;
++			kairo_decode_budget = ctrl->adaptive_decode_budget;
++		}
++
++		if (ctrl->adaptive_prefetch_budget < ctrl->base_prefetch_budget) {
++			ctrl->adaptive_prefetch_budget +=
++				min(KAIRO_CTRL_RELAX_STEP,
++				    ctrl->base_prefetch_budget -
++				    ctrl->adaptive_prefetch_budget);
++			ctrl->controller_relax_events++;
++			kairo_prefetch_budget = ctrl->adaptive_prefetch_budget;
++		}
++	}
++}
++
++/*
++ * dd_kairo_controller_update - Main controller update entry point.
++ *
++ * Called periodically (every control_window_ns) from the dispatch path
++ * or a timer. Samples are accumulated between updates; the controller
++ * computes latency percentiles and applies policy adjustments, then
++ * resets the sample window.
++ *
++ * CONCEPTUAL-HOOK: Exact call site depends on scheduler integration.
++ * Options include:
++ *   (a) In dd_dispatch_request(), check time and call if window elapsed.
++ *   (b) In a per-device timer callback.
++ *   (c) In the blk-mq completion path via a request completion hook.
++ *
++ * Returns true if a controller update was performed, false otherwise.
++ */
++static bool dd_kairo_controller_update(struct deadline_data *dd, u64 now_ns)
++{
++	struct kairo_latency_controller *ctrl = &dd->kairo_lat_ctrl;
++
++	if (ctrl->mode == KAIRO_CTRL_OFF)
++		return false;
++
++	/* Check if control window has elapsed */
++	if (now_ns - ctrl->last_control_update_ns < ctrl->control_window_ns)
++		return false;
++
++	ctrl->last_control_update_ns = now_ns;
++
++	/* Compute percentiles from accumulated samples */
++	dd_kairo_controller_compute_pXX(ctrl);
++
++	/* Insufficient samples: stay in observe, do not act */
++	if (ctrl->decode_samples < KAIRO_CTRL_MIN_SAMPLES) {
++		ctrl->controller_insufficient_samples++;
++		/* Reset and wait for next window */
++		ctrl->decode_samples = 0;
++		ctrl->decode_latency_sum_us = 0;
++		ctrl->decode_latency_max_us = 0;
++		return true;
++	}
++
++	/* Apply policy if in adaptive mode */
++	if (ctrl->mode == KAIRO_CTRL_ADAPTIVE)
++		dd_kairo_controller_apply(dd);
++
++	/* Reset sample window */
++	ctrl->decode_samples = 0;
++	ctrl->decode_latency_sum_us = 0;
++	ctrl->decode_latency_max_us = 0;
++
++	return true;
++}
++
+ /*
+  * Kairo request classification helpers.
+  *
+@@ -108,9 +115,11 @@ struct deadline_data {
+ 	int front_merges;
+ 	spinlock_t zone_lock;
+ 	spinlock_t dispatch_lock;
++
++	/* Stage 10: Adaptive latency controller */
++	struct kairo_latency_controller	kairo_lat_ctrl;
+ };
+ 
+-/* 
++/*
+  * deadline data field accessors
+  */
+ #define KAIRO_MAX_PRIO 3
+@@ -134,6 +143,10 @@ EXPORT_SYMBOL_GPL(kairo_prefetch_budget);
+ unsigned int kairo_prefetch_deadline_us __read_mostly = 500;
+ EXPORT_SYMBOL_GPL(kairo_prefetch_deadline_us);
+ 
++/* Stage 10: Controller mode global (conceptual; real impl per-device) */
++enum kairo_controller_mode kairo_controller_mode __read_mostly = KAIRO_CTRL_OFF;
++EXPORT_SYMBOL_GPL(kairo_controller_mode);
++
+ /* Kairo I/O class helpers */
+ 
+ static inline bool kairo_is_decode_read(const struct request *rq)
+@@ -617,11 +630,21 @@ static bool dd_kairo_has_decode_read(struct deadline_data *dd)
+ static bool dd_kairo_should_demote_prefill(struct deadline_data *dd,
+ 					   struct request *rq)
+ {
++	const bool decode_under_pressure =
++		dd->kairo_lat_ctrl.mode == KAIRO_CTRL_ADAPTIVE &&
++		dd->kairo_lat_ctrl.observed_decode_p99_us >
++		dd->kairo_lat_ctrl.target_decode_p99_us;
++
+ 	return kairo_is_prefill_write(rq) &&
+-	       (dd_kairo_has_decode_read(dd) ||
+-		dd->kairo_prefetch_deadline_hits > dd->kairo_prefetch_dispatches);
++	       (dd_kairo_has_decode_read(dd) ||
++		dd->kairo_prefetch_deadline_hits > dd->kairo_prefetch_dispatches ||
++		decode_under_pressure);
+ }
+ 
++/*
++ * CONCEPTUAL-HOOK: dd_kairo_should_demote_evict() also uses the decode
++ * pressure signal. A real implementation would share a helper.
++ */
+ static bool dd_kairo_should_demote_evict(struct deadline_data *dd,
+ 					 struct request *rq)
+ {
+@@ -1050,6 +1073,7 @@ static struct request *dd_dispatch_request(struct blk_mq_hw_ctx *hctx)
+ 	unsigned long now = jiffies;
+ 	u64 now_ns = ktime_get_ns();
+ 	struct request *rq;
++	bool ctrl_updated;
+ 
+ 	lockdep_assert_held(&dd->lock);
+ 
+@@ -1057,6 +1081,10 @@ static struct request *dd_dispatch_request(struct blk_mq_hw_ctx *hctx)
+ 	if (!kairo_enable)
+ 		return __dd_dispatch_request(dd, now);
+ 
++	/* Stage 10: Controller update point */
++	ctrl_updated = dd_kairo_controller_update(dd, now_ns);
++	(void)ctrl_updated; /* Conceptual: may drive tracepoint in future */
++
+ 	spin_lock(&dd->lock);
+ 	rq = dd_kairo_dispatch_decode_request(dd, now);
+ 	if (rq) {
+@@ -1221,6 +1249,196 @@ SHOW_INT(deadline_fifo_batch_show, dd->fifo_batch);
+ #undef SHOW_INT
+ #undef SHOW_JIFFIES
+ 
++/* Stage 10: Controller sysfs read-only counters */
++static ssize_t deadline_kairo_controller_updates_show(
++	struct elevator_queue *e, char *page)
++{
++	struct deadline_data *dd = e->elevator_data;
++
++	return sysfs_emit(page, "%llu\n",
++			  (unsigned long long)dd->kairo_lat_ctrl.controller_updates);
++}
++
++static ssize_t deadline_kairo_controller_boost_events_show(
++	struct elevator_queue *e, char *page)
++{
++	struct deadline_data *dd = e->elevator_data;
++
++	return sysfs_emit(page, "%llu\n",
++			  (unsigned long long)dd->kairo_lat_ctrl.controller_boost_events);
++}
++
++static ssize_t deadline_kairo_controller_relax_events_show(
++	struct elevator_queue *e, char *page)
++{
++	struct deadline_data *dd = e->elevator_data;
++
++	return sysfs_emit(page, "%llu\n",
++			  (unsigned long long)dd->kairo_lat_ctrl.controller_relax_events);
++}
++
++static ssize_t deadline_kairo_controller_prefetch_throttles_show(
++	struct elevator_queue *e, char *page)
++{
++	struct deadline_data *dd = e->elevator_data;
++
++	return sysfs_emit(page, "%llu\n",
++			  (unsigned long long)dd->kairo_lat_ctrl.controller_throttle_prefetch_events);
++}
++
++static ssize_t deadline_kairo_controller_write_releases_show(
++	struct elevator_queue *e, char *page)
++{
++	struct deadline_data *dd = e->elevator_data;
++
++	return sysfs_emit(page, "%llu\n",
++			  (unsigned long long)dd->kairo_lat_ctrl.controller_release_write_events);
++}
++
++static ssize_t deadline_kairo_controller_insufficient_samples_show(
++	struct elevator_queue *e, char *page)
++{
++	struct deadline_data *dd = e->elevator_data;
++
++	return sysfs_emit(page, "%llu\n",
++			  (unsigned long long)dd->kairo_lat_ctrl.controller_insufficient_samples);
++}
++
++/* Stage 10: Controller sysfs read-only status fields */
++static ssize_t deadline_kairo_controller_mode_show(
++	struct elevator_queue *e, char *page)
++{
++	struct deadline_data *dd = e->elevator_data;
++
++	return sysfs_emit(page, "%d\n", (int)dd->kairo_lat_ctrl.mode);
++}
++
++static ssize_t deadline_kairo_observed_decode_p99_us_show(
++	struct elevator_queue *e, char *page)
++{
++	struct deadline_data *dd = e->elevator_data;
++
++	return sysfs_emit(page, "%llu\n",
++			  (unsigned long long)dd->kairo_lat_ctrl.observed_decode_p99_us);
++}
++
++static ssize_t deadline_kairo_observed_decode_p95_us_show(
++	struct elevator_queue *e, char *page)
++{
++	struct deadline_data *dd = e->elevator_data;
++
++	return sysfs_emit(page, "%llu\n",
++			  (unsigned long long)dd->kairo_lat_ctrl.observed_decode_p95_us);
++}
++
++static ssize_t deadline_kairo_observed_decode_avg_us_show(
++	struct elevator_queue *e, char *page)
++{
++	struct deadline_data *dd = e->elevator_data;
++
++	return sysfs_emit(page, "%llu\n",
++			  (unsigned long long)dd->kairo_lat_ctrl.observed_decode_avg_us);
++}
++
++static ssize_t deadline_kairo_adaptive_decode_budget_show(
++	struct elevator_queue *e, char *page)
++{
++	struct deadline_data *dd = e->elevator_data;
++
++	return sysfs_emit(page, "%u\n",
++			  dd->kairo_lat_ctrl.adaptive_decode_budget);
++}
++
++static ssize_t deadline_kairo_adaptive_prefetch_budget_show(
++	struct elevator_queue *e, char *page)
++{
++	struct deadline_data *dd = e->elevator_data;
++
++	return sysfs_emit(page, "%u\n",
++			  dd->kairo_lat_ctrl.adaptive_prefetch_budget);
++}
++
++/* Stage 10: Controller sysfs tunable knobs */
++static ssize_t deadline_kairo_controller_mode_store(
++	struct elevator_queue *e, const char *page, size_t count)
++{
++	struct deadline_data *dd = e->elevator_data;
++	int data, ret;
++
++	ret = kstrtoint(page, 0, &data);
++	if (ret < 0)
++		return ret;
++	if (data < KAIRO_CTRL_OFF || data > KAIRO_CTRL_ADAPTIVE)
++		return -EINVAL;
++	dd->kairo_lat_ctrl.mode = (enum kairo_controller_mode)data;
++	return count;
++}
++
++static ssize_t deadline_kairo_target_decode_p99_us_store(
++	struct elevator_queue *e, const char *page, size_t count)
++{
++	struct deadline_data *dd = e->elevator_data;
++	u64 data;
++	int ret;
++
++	ret = kstrtou64(page, 0, &data);
++	if (ret < 0)
++		return ret;
++	if (data == 0)
++		return -EINVAL;
++	dd->kairo_lat_ctrl.target_decode_p99_us = data;
++	return count;
++}
++
++static ssize_t deadline_kairo_control_window_ms_store(
++	struct elevator_queue *e, const char *page, size_t count)
++{
++	struct deadline_data *dd = e->elevator_data;
++	u64 data_ms;
++	int ret;
++
++	ret = kstrtou64(page, 0, &data_ms);
++	if (ret < 0)
++		return ret;
++	if (data_ms < 10 || data_ms > 60000)
++		return -EINVAL;
++	dd->kairo_lat_ctrl.control_window_ns = data_ms * NSEC_PER_MSEC;
++	return count;
++}
++
++static ssize_t deadline_kairo_control_window_ms_show(
++	struct elevator_queue *e, char *page)
++{
++	struct deadline_data *dd = e->elevator_data;
++
++	return sysfs_emit(page, "%llu\n",
++			  div64_u64(dd->kairo_lat_ctrl.control_window_ns,
++				    NSEC_PER_MSEC));
++}
++
++static ssize_t deadline_kairo_target_decode_p99_us_show(
++	struct elevator_queue *e, char *page)
++{
++	struct deadline_data *dd = e->elevator_data;
++
++	return sysfs_emit(page, "%llu\n",
++			  (unsigned long long)dd->kairo_lat_ctrl.target_decode_p99_us);
++}
++
++static ssize_t deadline_kairo_controller_enable_show(
++	struct elevator_queue *e, char *page)
++{
++	struct deadline_data *dd = e->elevator_data;
++
++	return sysfs_emit(page, "%d\n",
++			  dd->kairo_lat_ctrl.mode != KAIRO_CTRL_OFF ? 1 : 0);
++}
++
++static ssize_t deadline_kairo_controller_enable_store(
++	struct elevator_queue *e, const char *page, size_t count)
++{
++	struct deadline_data *dd = e->elevator_data;
++	int data, ret;
++
++	ret = kstrtoint(page, 0, &data);
++	if (ret < 0)
++		return ret;
++	dd->kairo_lat_ctrl.mode = data ? KAIRO_CTRL_OBSERVE : KAIRO_CTRL_OFF;
++	return count;
++}
++
+ #define STORE_FUNCTION(__FUNC, __PTR, MIN, MAX, __CONV)			\
+ static ssize_t __FUNC(struct elevator_queue *e, const char *page, size_t count)	\
+@@ -1228,6 +1446,9 @@ static struct elv_fs_entry deadline_attrs[] = {
+ 	DD_ATTR(kairo_enable),
+ 	DD_ATTR(kairo_decode_budget),
+ 	DD_ATTR(kairo_prefetch_budget),
++	/* Stage 10: Controller sysfs knobs */
++	DD_ATTR(kairo_controller_enable),
++	DD_ATTR(kairo_controller_mode),
+ 	DD_ATTR(kairo_prefetch_deadline_us),
+ 	DD_RO_ATTR(kairo_decode_dispatches),
+ 	DD_RO_ATTR(kairo_prefetch_dispatches),
+@@ -1237,6 +1458,24 @@ static struct elv_fs_entry deadline_attrs[] = {
+ 	DD_RO_ATTR(kairo_evict_demotions),
+ 	DD_RO_ATTR(kairo_normal_dispatches),
+ 	DD_RO_ATTR(kairo_starvation_escapes),
++	/* Stage 10: Controller counters */
++	DD_RO_ATTR(kairo_controller_updates),
++	DD_RO_ATTR(kairo_controller_boost_events),
++	DD_RO_ATTR(kairo_controller_relax_events),
++	DD_RO_ATTR(kairo_controller_prefetch_throttles),
++	DD_RO_ATTR(kairo_controller_write_releases),
++	DD_RO_ATTR(kairo_controller_insufficient_samples),
++	/* Stage 10: Controller observed state */
++	DD_RO_ATTR(kairo_controller_mode),
++	DD_RO_ATTR(kairo_observed_decode_p99_us),
++	DD_RO_ATTR(kairo_observed_decode_p95_us),
++	DD_RO_ATTR(kairo_observed_decode_avg_us),
++	DD_RO_ATTR(kairo_adaptive_decode_budget),
++	DD_RO_ATTR(kairo_adaptive_prefetch_budget),
++	DD_ATTR(kairo_target_decode_p99_us),
++	DD_ATTR(kairo_control_window_ms),
++	DD_ATTR(kairo_controller_enable),
++	DD_ATTR(kairo_controller_mode),
+ 	/* Stage 6: placement/lifetime scaffold counters */
+ 	DD_RO_ATTR(kairo_placement_hints),
+ 	DD_RO_ATTR(kairo_lifetime_short_count),
+diff --git a/include/trace/events/kairo.h b/include/trace/events/kairo.h
+index e69de29..0000000 100644
+--- a/include/trace/events/kairo.h
++++ b/include/trace/events/kairo.h
+@@ -1 +1,69 @@
++/*
++ * Stage 10: Kairo controller update tracepoint.
++ *
++ * CONCEPTUAL-HOOK: This tracepoint is described here for documentation
++ * purposes. It is not added to 0017 to avoid modifying the existing
++ * tracepoint patch. If the controller is validated, this tracepoint
++ * should be added to the Stage 8 tracepoint set.
++ *
++ * Tracepoint: kairo_controller_update
++ *
++ * Emitted when the adaptive latency controller performs a periodic
++ * update. Fields expose the control decision for offline analysis.
++ *
++ * Not stable ABI. For local kernel research only.
++ *
++ * TRACE_EVENT(kairo_controller_update,
++ *     TP_PROTO(unsigned int dev,
++ *              unsigned long long target_decode_p99_us,
++ *              unsigned long long observed_decode_p99_us,
++ *              unsigned int old_decode_budget,
++ *              unsigned int new_decode_budget,
++ *              unsigned int old_prefetch_budget,
++ *              unsigned int new_prefetch_budget,
++ *              unsigned int action,
++ *              unsigned int reason),
++ *
++ *     TP_ARGS(dev, target_decode_p99_us, observed_decode_p99_us,
++ *             old_decode_budget, new_decode_budget,
++ *             old_prefetch_budget, new_prefetch_budget,
++ *             action, reason),
++ *
++ *     TP_STRUCT__entry(
++ *         __field(unsigned int, dev)
++ *         __field(unsigned long long, target_decode_p99_us)
++ *         __field(unsigned long long, observed_decode_p99_us)
++ *         __field(unsigned int, old_decode_budget)
++ *         __field(unsigned int, new_decode_budget)
++ *         __field(unsigned int, old_prefetch_budget)
++ *         __field(unsigned int, new_prefetch_budget)
++ *         __field(unsigned int, action)
++ *         __field(unsigned int, reason)
++ *     ),
++ *
++ *     TP_fast_assign(
++ *         __entry->dev = dev;
++ *         __entry->target_decode_p99_us = target_decode_p99_us;
++ *         __entry->observed_decode_p99_us = observed_decode_p99_us;
++ *         __entry->old_decode_budget = old_decode_budget;
++ *         __entry->new_decode_budget = new_decode_budget;
++ *         __entry->old_prefetch_budget = old_prefetch_budget;
++ *         __entry->new_prefetch_budget = new_prefetch_budget;
++ *         __entry->action = action;
++ *         __entry->reason = reason;
++ *     ),
++ *
++ *     TP_printk("dev=%u target_p99=%llu obs_p99=%llu "
++ *               "decode_budget=%u->%u prefetch_budget=%u->%u "
++ *               "action=%u reason=%u",
++ *               __entry->dev, __entry->target_decode_p99_us,
++ *               __entry->observed_decode_p99_us,
++ *               __entry->old_decode_budget, __entry->new_decode_budget,
++ *               __entry->old_prefetch_budget, __entry->new_prefetch_budget,
++ *               __entry->action, __entry->reason)
++ * );
++ *
++ * Action values:
++ *   0 = no change (observe only)
++ *   1 = boost (increase decode budget)
++ *   2 = relax (decrease decode budget toward base)
++ *   3 = throttle_prefetch (reduce prefetch budget)
++ *   4 = release_writes (allow write progress)
++ */

@@ -57,3 +57,26 @@ feature-detected NVMe hooks. These patches are:
 - No-op safe: all hooks degrade gracefully when backend support is absent
 - Not yet foundation-integrated: Stage 7 remains in the broad RFC/POC patch
   series, not in `kernel/patches/foundation/`
+
+## Stage 10 Adaptive Controller Status
+
+Stage 10 (`0018`) adds a conceptual adaptive decode tail-latency controller:
+
+- **Controller structure**: `enum kairo_controller_mode`, `struct kairo_latency_controller`
+  defined in `block/mq-deadline.c` with conceptual annotations
+- **Policy**: Adjusts decode/prefetch budgets based on observed decode p99 vs target
+- **Sysfs**: Tunables (`kairo_controller_enable`, `kairo_controller_mode`,
+  `kairo_target_decode_p99_us`, `kairo_control_window_ms`) and counters
+  (`kairo_controller_updates`, `kairo_controller_*_events`, etc.)
+- **Decode latency measurement**: CONCEPTUAL-HOOK — no completion path call site wired
+- **p95/p99 computation**: Coarse avg/max heuristic; real implementation needs
+  exponential latency buckets
+- **Tracepoint**: `kairo_controller_update` documented in 0018 but not wired into
+  Stage 8 tracepoint set
+- **Experiment harness**: Six canonical cases with structured results under
+  `results/stage10/<timestamp>/`
+- **Summary parser**: `parse_stage10_latency_controller_summary.py` with CSV and
+  pretty-printed output, controller counter delta columns
+
+Stage 10 is **not** foundation-integrated, **not** LKML-ready, and **not**
+boot-validated. It is an RFC/POC adaptive scheduling policy scaffold.
