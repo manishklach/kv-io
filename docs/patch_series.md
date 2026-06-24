@@ -36,6 +36,7 @@ local apply/build target for Stage 1 and Stage 2 validation.
 | `0023` | decode latency histogram | `block/mq-deadline.c` | Bucketed decode latency histogram with p95/p99 tail estimator; replaces coarse avg/max heuristic in Stage 10 adaptive controller; 10 histogram buckets from 0-10us to >5ms; enum, struct, helpers, sysfs counters; CONCEPTUAL-HOOK; user-space benchmark histogram output; five canonical experiment cases |
 | `0024` | controller feedback wiring | `block/mq-deadline.c`, `include/linux/blk-mq.h` | Wires decode latency observations into the Stage 10 adaptive controller; `kairo_mark_classify_time()`, `kairo_mark_dispatch_time()`, `kairo_decode_queue_latency_us()` helpers; timestamp metadata in `kairo_request_hints`; dispatch call site feeds histogram; missing timestamp handling; 5 feedback counters; `kairo_controller_sample` tracepoint (documented only); 5 canonical experiment cases |
 | `0025` | fairness accounting sysfs | `block/mq-deadline.c` | Wires Stage 12 fairness counters into sysfs boilerplate; 5 tunables with bounds-checked show/store; 7 counters with read-only show; counter increment wiring in fairness hooks; LINUX-6.8-CHECK annotations |
+| `0026` | blk-cgroup AI I/O controller | `block/blk-kairo-blkcg.c`, `include/linux/blk-cgroup.h` | blk-cgroup policy scaffold for AI inference containers; `enum kairo_blkg_policy_class`; `struct kairo_blkg_policy` with per-class weights; `struct kairo_blkg_stats`; 5 conceptual hooks; blkcg audit script; cgroup interface files documented but implementation deferred |
 
 ## Design Themes
 

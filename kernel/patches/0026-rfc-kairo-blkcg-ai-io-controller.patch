@@ -1,0 +1,427 @@
+From: Kairo Authors <kairo@research>
+Date: Wed Jun 24 17:00:00 2026 +0000
+Subject: [RFC/POC] 0026: blk-cgroup AI I/O controller scaffold
+
+RFC/POC — Not for LKML submission.
+
+Add a conceptual blk-cgroup AI I/O controller scaffold that maps Kairo
+request classes to cgroup-level policy.
+
+Real AI inference runs in containers, services, tenants, and jobs.
+Today the block cgroup subsystem (blk-cgroup, blk-iocost, blk-throttle)
+does not understand AI inference I/O patterns. Kairo's per-request
+classification (decode, prefetch, prefill, eviction) should eventually
+be connected to cgroup-level budgets and policies.
+
+This patch adds:
+
+  enum kairo_blkg_policy_class
+    KAIRO_BLKG_DEFAULT
+    KAIRO_BLKG_PRODUCTION_DECODE
+    KAIRO_BLKG_BATCH_PREFILL
+    KAIRO_BLKG_PREFETCH
+    KAIRO_BLKG_EVICTION
+    KAIRO_BLKG_BACKGROUND
+
+  struct kairo_blkg_policy
+    policy_class, target_decode_p99_us, decode_weight,
+    prefetch_weight, write_weight, eviction_weight,
+    allow_recompute_eviction, enable_adaptive_controller,
+    enable_model_fairness
+
+  struct kairo_blkg_stats
+    decode_dispatches, prefetch_dispatches, prefill_writes,
+    evictions, throttled_prefetches, demoted_writes,
+    latency_violations
+
+Conceptual hooks:
+
+  kairo_blkg_policy_from_request(struct request *rq)
+  kairo_blkg_allow_decode(struct request *rq)
+  kairo_blkg_throttle_prefetch(struct request *rq)
+  kairo_blkg_demote_write(struct request *rq)
+  kairo_blkg_account_dispatch(struct request *rq)
+
+These are CONCEPTUAL-HOOK points with LINUX-6.8-CHECK annotations.
+They are not wired into the dispatch path.
+
+Conceptual cgroup interface files (scaffold only, no filesystem
+implementation):
+
+  kairo.policy_class
+  kairo.target_decode_p99_us
+  kairo.decode_weight
+  kairo.prefetch_weight
+  kairo.write_weight
+  kairo.eviction_weight
+  kairo.allow_recompute_eviction
+
+Sysfs counters (for eventual registration):
+
+  kairo_blkg_decode_dispatches
+  kairo_blkg_prefetch_dispatches
+  kairo_blkg_prefill_writes
+  kairo_blkg_evictions
+  kairo_blkg_throttled_prefetches
+  kairo_blkg_demoted_writes
+  kairo_blkg_latency_violations
+
+LINUX-6.8-CHECK:
+  block/blk-cgroup.c:         struct blkcg, struct blkcg_gq, blkg_lookup
+  block/blk-iocost.c:         ioc_weight_parse pattern for cgroup knobs
+  block/blk-throttle.c:       throtl_pd_alloc/free for policy data
+  include/linux/blk-cgroup.h: blkcg_policy, blkcg_policy_register
+
+Signed-off-by: Kairo Authors <kairo@research>
+---
+ block/Makefile             |   1 +
+ block/blk-kairo-blkcg.c    | 260 +++++++++++++++++++++++++++++++++++++
+ include/linux/blk-cgroup.h |  76 ++++++++++-
+ 3 files changed, 335 insertions(+), 2 deletions(-)
+ create mode 100644 block/blk-kairo-blkcg.c
+
+diff --git a/block/Makefile b/block/Makefile
+index c3d4e5f..a1b2c3d 100755
+--- a/block/Makefile
++++ b/block/Makefile
+@@ -35,6 +35,7 @@ obj-$(CONFIG_BLK_DEV_BSG)	+= bsg.o
+ obj-$(CONFIG_BLK_CGROUP)	+= blk-cgroup.o
+ obj-$(CONFIG_BLK_CGROUP)	+= blk-throttle.o
+ obj-$(CONFIG_BLK_CGROUP_IOLATENCY)=>+ blk-iolatency.o
++obj-$(CONFIG_BLK_CGROUP_KAIRO)	+= blk-kairo-blkcg.o
+ obj-$(CONFIG_BLK_CGROUP_IOCOST)	+= blk-iocost.o
+ obj-$(CONFIG_BLK_CGROUP_FDIO)	+= blk-fdio.o
+ obj-$(CONFIG_BLK_MQ)		+= blk-mq.o
+diff --git a/block/blk-kairo-blkcg.c b/block/blk-kairo-blkcg.c
+new file mode 100644
+index 0000000..d4e5f6a
+--- /dev/null
++++ b/block/blk-kairo-blkcg.c
+@@ -0,0 +1,260 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * blk-cgroup AI I/O controller scaffold — Kairo
++ *
++ * RFC/POC — Not for LKML submission.
++ *
++ * Provides a conceptual blk-cgroup policy that maps Kairo request
++ * classes (decode, prefetch, prefill, eviction) to per-cgroup I/O
++ * budgets, weights, and dispatch policies.
++ *
++ * LINUX-6.8-CHECK: This file uses blkcg_policy, blkg_lookup,
++ * blkcg_policy_register, and cgroup file handling patterns from
++ * Linux 6.8 block/blk-cgroup.c, block/blk-iocost.c, and
++ * block/blk-throttle.c.
++ */
++
++#include <linux/blk-cgroup.h>
++#include <linux/blk-mq.h>
++#include <linux/slab.h>
++#include <linux/atomic.h>
++
++/*
++ * struct kairo_blkg_policy
++ *
++ * Per-cgroup Kairo I/O policy.  Attached to a blkcg_gq via the
++ * blkcg_policy framework.  Controls how Kairo-classified requests
++ * from this cgroup are scheduled relative to other cgroups.
++ *
++ * CONCEPTUAL-HOOK: Allocation and free functions exist but are not
++ * registered with blkcg_policy_register().
++ */
++struct kairo_blkg_policy {
++	/* Policy class for this cgroup */
++	enum kairo_blkg_policy_class policy_class;
++
++	/* Target decode tail latency in microseconds */
++	u64 target_decode_p99_us;
++
++	/* Relative I/O weights across Kairo classes */
++	u32 decode_weight;
++	u32 prefetch_weight;
++	u32 write_weight;
++	u32 eviction_weight;
++
++	/* Policy flags */
++	bool allow_recompute_eviction;
++	bool enable_adaptive_controller;
++	bool enable_model_fairness;
++};
++
++/*
++ * struct kairo_blkg_stats
++ *
++ * Per-cgroup Kairo I/O statistics.  Incremented by the conceptual
++ * hooks in kairo_blkg_* functions.
++ *
++ * CONCEPTUAL-HOOK: These counters are not wired to sysfs or cgroup
++ * filesystem yet.
++ */
++struct kairo_blkg_stats {
++	u64 decode_dispatches;
++	u64 prefetch_dispatches;
++	u64 prefill_writes;
++	u64 evictions;
++	u64 throttled_prefetches;
++	u64 demoted_writes;
++	u64 latency_violations;
++};
++
++/*
++ * kairo_blkg_policy_from_request
++ *
++ * Look up the Kairo blk-cgroup policy for a given request.
++ *
++ * Uses bio_blkcg(bio) to find the cgroup, then blkg_lookup to find
++ * the blkcg_gq, then blkg_to_pd to retrieve the per-policy data.
++ *
++ * CONCEPTUAL-HOOK: This function is defined but not called from any
++ * dispatch path.
++ *
++ * LINUX-6.8-CHECK: blkg_lookup signature and blkg_to_pd macro may
++ * differ across kernel versions.
++ */
++static struct kairo_blkg_policy * __maybe_unused
++kairo_blkg_policy_from_request(struct request *rq)
++{
++	struct blkcg_gq *blkg;
++	struct kairo_blkg_policy *kpolicy = NULL;
++	struct bio *bio = rq->bio;
++
++	if (!bio)
++		return NULL;
++
++	rcu_read_lock();
++	blkg = blkg_lookup(bio_blkcg(bio), bio->bi_bdev->bd_queue);
++	if (blkg && blkg->pd[KAIRO_BLKG_POLICY])
++		kpolicy = blkg_to_pd(blkg, KAIRO_BLKG_POLICY);
++	rcu_read_unlock();
++
++	/*
++	 * CONCEPTUAL-HOOK: blkg_to_pd returns void*; caller must cast.
++	 * KAIRO_BLKG_POLICY is an enum placeholder (not registered).
++	 */
++	return kpolicy;
++}
++
++/*
++ * kairo_blkg_allow_decode
++ *
++ * Determine whether a decode-class request from this cgroup should
++ * be dispatched immediately.
++ *
++ * Returns true if the cgroup's decode weight is non-zero and its
++ * decode dispatches are within budget relative to other classes.
++ *
++ * CONCEPTUAL-HOOK: Always returns true in this scaffold.
++ */
++static bool __maybe_unused
++kairo_blkg_allow_decode(struct request *rq)
++{
++	struct kairo_blkg_policy *kp = kairo_blkg_policy_from_request(rq);
++
++	if (!kp || kp->decode_weight == 0)
++		return false;
++
++	/* CONCEPTUAL-HOOK: Real budget comparison against sibling
++	 * cgroups would be implemented here.
++	 */
++	return true;
++}
++
++/*
++ * kairo_blkg_throttle_prefetch
++ *
++ * Determine whether a prefetch-class request from this cgroup should
++ * be throttled (deferred) to preserve dispatch capacity for decode.
++ *
++ * CONCEPTUAL-HOOK: Always returns false (do not throttle) in this
++ * scaffold.
++ */
++static bool __maybe_unused
++kairo_blkg_throttle_prefetch(struct request *rq)
++{
++	struct kairo_blkg_policy *kp = kairo_blkg_policy_from_request(rq);
++
++	if (!kp || kp->prefetch_weight == 0)
++		return true;
++
++	/* CONCEPTUAL-HOOK: Real throttle policy would compare
++	 * decode vs prefetch dispatch ratios across cgroups.
++	 */
++	return false;
++}
++
++/*
++ * kairo_blkg_demote_write
++ *
++ * Determine whether a write-class request from this cgroup should be
++ * demoted (deprioritized) under decode pressure.
++ *
++ * CONCEPTUAL-HOOK: Always returns false (no demotion) in this
++ * scaffold.
++ */
++static bool __maybe_unused
++kairo_blkg_demote_write(struct request *rq)
++{
++	struct kairo_blkg_policy *kp = kairo_blkg_policy_from_request(rq);
++
++	if (!kp || kp->write_weight == 0)
++		return true;
++
++	/* CONCEPTUAL-HOOK: Real demotion policy would check
++	 * decode vs write dispatch ratios and target p99 latency.
++	 */
++	return false;
++}
++
++/*
++ * kairo_blkg_account_dispatch
++ *
++ * Account a dispatched request in the cgroup's Kairo stats.
++ *
++ * CONCEPTUAL-HOOK: Increments counter based on io_class, but no
++ * call site is wired.
++ */
++static void __maybe_unused
++kairo_blkg_account_dispatch(struct request *rq)
++{
++	struct kairo_blkg_policy *kp = kairo_blkg_policy_from_request(rq);
++
++	if (!kp)
++		return;
++
++	/* CONCEPTUAL-HOOK: Increment per-class counters;
++	 * no per-blkg_stats pointer allocated yet.
++	 */
++}
++
++/*
++ * cgroup interface files (conceptual)
++ *
++ * These cgroupfs knobs are documented but not implemented.  The
++ * naming and value ranges are candidates for a future real cgroup
++ * controller registration.
++ *
++ *   kairo.policy_class
++ *     Values: default|production_decode|batch_prefill|prefetch|
++ *             eviction|background
++ *     Default: default
++ *
++ *   kairo.target_decode_p99_us
++ *     Per-cgroup target decode p99 latency in microseconds.
++ *     Default: 2000
++ *     Range: 100..100000
++ *
++ *   kairo.decode_weight
++ *     Relative I/O weight for decode-class requests.
++ *     Default: 100
++ *     Range: 0..1000
++ *
++ *   kairo.prefetch_weight
++ *     Relative I/O weight for prefetch-class requests.
++ *     Default: 50
++ *     Range: 0..1000
++ *
++ *   kairo.write_weight
++ *     Relative I/O weight for write-class requests.
++ *     Default: 25
++ *     Range: 0..1000
++ *
++ *   kairo.eviction_weight
++ *     Relative I/O weight for eviction-class requests.
++ *     Default: 10
++ *     Range: 0..1000
++ *
++ *   kairo.allow_recompute_eviction
++ *     Allow eviction of recomputable data from this cgroup.
++ *     Values: 0|1
++ *     Default: 1
++ *
++ * All cgroup knobs require CONFIG_BLK_CGROUP_KAIRO and are not
++ * available in upstream Linux.
++ */
++
++/*
++ * blkcg_policy operations (conceptual)
++ *
++ * LINUX-6.8-CHECK: The blkcg_policy struct requires .pd_alloc_fn,
++ * .pd_free_fn, .pd_init_fn function pointers. The patterns follow
++ * blk-throttle.c.
++ */
++#if 0
++/* CONCEPTUAL-HOOK: Registration deferred */
++static struct blkcg_policy kairo_blkcg_policy = {
++	.pd_alloc_fn	= kairo_blkg_pd_alloc,
++	.pd_free_fn	= kairo_blkg_pd_free,
++	.pd_init_fn	= kairo_blkg_pd_init,
++	.cftypes	= kairo_blkg_cftypes,
++};
++#endif
++
++MODULE_LICENSE("GPL");
++MODULE_AUTHOR("Kairo Authors");
++MODULE_DESCRIPTION("blk-cgroup AI I/O controller scaffold — Kairo RFC/POC");
+diff --git a/include/linux/blk-cgroup.h b/include/linux/blk-cgroup.h
+index 3d4e5f6..b7c8d9e 100755
+--- a/include/linux/blk-cgroup.h
++++ b/include/linux/blk-cgroup.h
+@@ -25,6 +25,13 @@
+ #include <linux/atomic.h>
+ 
+ /*
++ * Kairo blk-cgroup policy class
++ *
++ * Maps Kairo request classes to cgroup-level policy.
++ * CONCEPTUAL-HOOK: Not wired to any dispatch decision.
++ */
++
++/*
+  * blkcg and blkcg_gq are always compiled in.
+  *
+  * After blkcg destruction, the policy persists for the life of each
+@@ -44,6 +51,30 @@ struct blkcg_policy {
+ 	unsigned int			pol_id;
+ };
+ 
++/*
++ * Kairo blk-cgroup policy class enum
++ *
++ * Identifies the type of AI I/O workload for a cgroup.  A single
++ * cgroup can contain only one policy class; multi-class cgroups
++ * would require per-request-type sub-accounting.
++ *
++ * LINUX-6.8-CHECK: Enum values are local to Kairo; not part of
++ * the upstream blkcg_policy interface.
++ */
++enum kairo_blkg_policy_class {
++	KAIRO_BLKG_DEFAULT = 0,
++	KAIRO_BLKG_PRODUCTION_DECODE,
++	KAIRO_BLKG_BATCH_PREFILL,
++	KAIRO_BLKG_PREFETCH,
++	KAIRO_BLKG_EVICTION,
++	KAIRO_BLKG_BACKGROUND,
++};
++
++/*
++ * Placeholder for blkcg_policy registration index.
++ * CONCEPTUAL-HOOK: Not registered; value reserved for future use.
++ */
++#define KAIRO_BLKG_POLICY 42
++
+ #ifdef CONFIG_BLK_CGROUP
+ 
+ struct blkcg {
+@@ -80,8 +111,8 @@ static inline void blkcg_bio_issue_init(struct bio *bio)
+ }
+ 
+ #else
+-
+-/* CONFIG_BLK_CGROUP not enabled — stubs only */
++/* CONFIG_BLK_CGROUP not enabled — no blkcg, no Kairo cgroup policy */
++/* CONFIG_BLK_CGROUP_KAIRO not yet a real Kconfig symbol */
+ 
+ struct blkcg {
+ 	/* empty when CONFIG_BLK_CGROUP is disabled */
+-- 
+2.45.1

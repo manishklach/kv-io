@@ -25,6 +25,7 @@
 | decode latency histogram | `0023` | conceptual | Bucketed decode latency histogram with p95/p99 tail estimator; replaces avg/max heuristic in Stage 10 controller; 10 histogram buckets; 12 sysfs counters; five canonical experiment cases; user-space benchmark histogram output |
 | controller feedback wiring | `0024` | conceptual | Wires decode latency observations into the Stage 10 adaptive controller; timestamp metadata in request hints; classify/dispatch time recording; missing timestamp handling; histogram-based controller update; 5 feedback counters; 5 canonical experiment cases; `kairo_controller_sample` tracepoint (documented only) |
 | fairness accounting and sysfs wiring | `0025` | conceptual | Wires Stage 12 fairness counters into sysfs boilerplate with DD_RO_ATTR macros; adds show/store for 5 tunables with bounds checking; adds show for 7 counters; counters wired into fairness hooks as event observations; LINUX-6.8-CHECK annotations |
+| blk-cgroup AI I/O controller | `0026` | conceptual | blk-cgroup policy scaffold mapping Kairo request classes to cgroup-level I/O budgets; `enum kairo_blkg_policy_class`, `struct kairo_blkg_policy`, `struct kairo_blkg_stats`; 5 conceptual hooks; blkcg audit script; cgroup interface files documented only |
 
 ## Stage 6.5 Status
 
@@ -204,6 +205,21 @@
 | Summary parser | implemented | `parse_stage15_fairness_accounting_summary.py` with CSV and pretty-printed output |
 | Counter coverage | updated | `collect_kairo_counters.sh` includes all fairness counters |
 | Stage 15 documentation | implemented | `docs/stage15_fairness_accounting_sysfs.md` |
+
+## Stage 16 Status
+
+| Area | Status | Notes |
+|------|--------|-------|
+| blk-cgroup policy enum | scaffolded | `enum kairo_blkg_policy_class` with 6 classes in blk-cgroup.h |
+| Policy data structure | scaffolded | `struct kairo_blkg_policy` with weights, flags, target p99 |
+| Stats structure | scaffolded | `struct kairo_blkg_stats` with 7 per-cgroup counters |
+| Conceptual hooks | scaffolded | 5 hooks defined, all return conservative defaults |
+| cgroup interface files | documented | 7 cgroupfs knobs documented but not implemented |
+| blkcg audit script | implemented | `audit_blkcg_hooks.sh` checks Linux 6.8 for candidate hook points |
+| Experiment harness | implemented | `run_stage16_blkcg_experiment.sh` with five canonical cases |
+| Summary parser | implemented | `parse_stage16_blkcg_summary.py` with CSV and pretty-printed output |
+| Counter coverage | updated | `collect_kairo_counters.sh` includes blkcg counters |
+| Stage 16 documentation | implemented | `docs/stage16_blkcg_ai_io_controller.md` |
 
 ## Current Read
 

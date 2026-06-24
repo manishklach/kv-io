@@ -590,6 +590,50 @@ grep -qF "kairo_fairness_refills" "$REPO_ROOT/scripts/collect_kairo_counters.sh"
 grep -qF "stage15_dryrun" "$REPO_ROOT/scripts/run_wsl_validation_snapshot.sh" || \
   fail "Stage 15: run_wsl_validation_snapshot.sh missing stage15_dryrun"
 
+# Stage 16: verify blk-cgroup AI I/O controller scaffold
+stage16_has_pattern() {
+  local file="$1" pattern="$2"
+  grep -qF -- "$pattern" "$file" || fail "Stage 16: missing pattern '$pattern' in $(basename "$file")"
+}
+
+stage16_file_exists() {
+  [[ -f "$1" ]] || fail "Stage 16: missing file: $1"
+}
+
+P26="$PATCH_DIR/0026-rfc-kairo-blkcg-ai-io-controller.patch"
+DOC16="$REPO_ROOT/docs/stage16_blkcg_ai_io_controller.md"
+R16SE="$REPO_ROOT/scripts/run_stage16_blkcg_experiment.sh"
+P16SP="$REPO_ROOT/scripts/parse_stage16_blkcg_summary.py"
+AUDIT_BLKCG="$REPO_ROOT/kernel/integration/linux-6.8/audit_blkcg_hooks.sh"
+
+stage16_file_exists "$P26"
+stage16_file_exists "$DOC16"
+stage16_file_exists "$R16SE"
+stage16_file_exists "$P16SP"
+stage16_file_exists "$AUDIT_BLKCG"
+stage16_has_pattern "$P26" "struct kairo_blkg_policy"
+stage16_has_pattern "$P26" "kairo_blkg_policy_from_request"
+stage16_has_pattern "$P26" "kairo_blkg_allow_decode"
+stage16_has_pattern "$P26" "kairo_blkg_throttle_prefetch"
+stage16_has_pattern "$P26" "kairo_blkg_demote_write"
+stage16_has_pattern "$P26" "kairo_blkg_account_dispatch"
+stage16_has_pattern "$DOC16" "blk-cgroup AI I/O Controller Scaffold"
+stage16_has_pattern "$R16SE" "results/stage16"
+stage16_has_pattern "$R16SE" "block-device"
+stage16_has_pattern "$P16SP" "--csv"
+stage16_has_pattern "$P16SP" "--pretty"
+stage16_has_pattern "$P16SP" "DELTA_FIELDS"
+stage16_has_pattern "$AUDIT_BLKCG" "blkg_lookup"
+stage16_has_pattern "$AUDIT_BLKCG" "blkcg_policy_register"
+
+# Verify collect_kairo_counters.sh includes blkcg counters
+grep -qF "kairo_blkg_decode_dispatches" "$REPO_ROOT/scripts/collect_kairo_counters.sh" || \
+  fail "Stage 16: collect_kairo_counters.sh missing kairo_blkg_decode_dispatches"
+
+# Verify WSL validation includes stage16_dryrun
+grep -qF "stage16_dryrun" "$REPO_ROOT/scripts/run_wsl_validation_snapshot.sh" || \
+  fail "Stage 16: run_wsl_validation_snapshot.sh missing stage16_dryrun"
+
 # Stage 9: verify WSL validation files
 [[ -f "$REPO_ROOT/scripts/check_wsl_environment.sh" ]] || fail "Stage 9: missing scripts/check_wsl_environment.sh"
 [[ -f "$REPO_ROOT/scripts/run_wsl_validation_snapshot.sh" ]] || fail "Stage 9: missing scripts/run_wsl_validation_snapshot.sh"

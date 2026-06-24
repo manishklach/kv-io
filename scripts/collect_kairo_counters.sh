@@ -147,6 +147,15 @@ counter_names=(
   kairo_protected_decode_dispatches
   kairo_prefetch_fairness_throttles
   kairo_write_fairness_demotions
+
+  # Stage 16: blk-cgroup AI I/O controller counters (conceptual)
+  kairo_blkg_decode_dispatches
+  kairo_blkg_prefetch_dispatches
+  kairo_blkg_prefill_writes
+  kairo_blkg_evictions
+  kairo_blkg_throttled_prefetches
+  kairo_blkg_demoted_writes
+  kairo_blkg_latency_violations
 )
 
 for name in "${counter_names[@]}"; do

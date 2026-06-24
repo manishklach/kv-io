@@ -186,3 +186,34 @@ Stage 15 is **not** foundation-integrated, **not** LKML-ready, and **not**
 boot-validated. The dispatch-path integration of fairness hooks remains
 CONCEPTUAL-HOOK. Kernel-side fairness counter movement is not claimed unless
 tested on a patched kernel.
+
+## Stage 16 blk-cgroup AI I/O Controller Status
+
+Stage 16 (`0026`) adds a conceptual blk-cgroup AI I/O controller scaffold:
+
+- **Policy model**: `enum kairo_blkg_policy_class` with 6 classes
+  (DEFAULT, PRODUCTION_DECODE, BATCH_PREFILL, PREFETCH, EVICTION, BACKGROUND)
+  mapping Kairo request classes to cgroup-level I/O policy
+- **Data structures**: `struct kairo_blkg_policy` (per-cgroup policy with
+  weights, target p99, and flags) and `struct kairo_blkg_stats` (per-cgroup
+  counters)
+- **Conceptual hooks**: `kairo_blkg_policy_from_request`, `kairo_blkg_allow_decode`,
+  `kairo_blkg_throttle_prefetch`, `kairo_blkg_demote_write`,
+  `kairo_blkg_account_dispatch` -- all defined but never called from dispatch path
+- **cgroup interface**: 7 cgroupfs knobs documented
+  (`kairo.policy_class`, `kairo.decode_weight`, etc.) but not implemented;
+  `blkcg_policy` struct is guarded by `#if 0`
+- **blkcg audit script**: `kernel/integration/linux-6.8/audit_blkcg_hooks.sh`
+  checks Linux 6.8 for candidate hook points (`blkg_lookup`, `blkcg_policy_register`,
+  `bio_blkcg`, etc.)
+- **Experiment harness**: `run_stage16_blkcg_experiment.sh` with five canonical
+  cases under `results/stage16/<timestamp>/`
+- **Summary parser**: `parse_stage16_blkcg_summary.py` with CSV and pretty-printed
+  output, blkcg counter delta columns
+
+Stage 16 is **not** foundation-integrated, **not** LKML-ready, and **not**
+boot-validated. The `blkcg_policy_register()` call is not executed. The cgroup
+interface files are not mounted. Dispatch-path integration of blkcg hooks
+remains CONCEPTUAL-HOOK. Kernel-side blkcg counter movement is not claimed
+unless tested on a patched kernel with `CONFIG_BLK_CGROUP` enabled and
+`CONFIG_BLK_CGROUP_KAIRO` present.

@@ -422,3 +422,35 @@ framework:
   - per-device fairness state (uses static/placeholder)
   - interaction with Stage 10 adaptive controller
   - interaction with BPF dispatch hook (patch 0016)
+
+## Stage 16
+
+- Broad RFC/POC patches involved: `0026`
+- Docs: `docs/stage16_blkcg_ai_io_controller.md`
+- Scripts:
+  - `scripts/run_stage16_blkcg_experiment.sh`
+  - `scripts/parse_stage16_blkcg_summary.py`
+  - `kernel/integration/linux-6.8/audit_blkcg_hooks.sh`
+- What should compile:
+  - `enum kairo_blkg_policy_class` in `include/linux/blk-cgroup.h`
+  - `struct kairo_blkg_policy` and `struct kairo_blkg_stats` in `block/blk-kairo-blkcg.c`
+  - conceptual hooks: `kairo_blkg_policy_from_request`, `kairo_blkg_allow_decode`,
+    `kairo_blkg_throttle_prefetch`, `kairo_blkg_demote_write`,
+    `kairo_blkg_account_dispatch`
+  - blkcg audit script for Linux 6.8 candidate hook points
+  - `CONFIG_BLK_CGROUP_KAIRO` Makefile guard (scaffold only)
+- What should be measurable:
+  - conceptual cgroup policy class model for AI inference containers
+  - five canonical experiment cases covering single-tenant, multi-tenant,
+    and background pressure
+  - structured output under `results/stage16/<timestamp>/`
+  - parseable summary logs with CSV and pretty-printed tables
+  - audit script runs against Linux 6.8 source tree
+- What is still RFC-only:
+  - real `blkcg_policy_register()` call (blocked by `#if 0`)
+  - cgroup filesystem interface files (documented only)
+  - dispatch-path integration of blkcg hooks (CONCEPTUAL-HOOK)
+  - per-blkg_stats allocation (no `pd_alloc_fn` wired)
+  - multi-cgroup fair scheduling
+  - `CONFIG_BLK_CGROUP_KAIRO` Kconfig symbol (does not exist upstream)
+  - benchmark `--tenant-id` / `--tenants` / `--tenant-mode` flags (placeholders only)

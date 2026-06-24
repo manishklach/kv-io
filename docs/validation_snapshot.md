@@ -1,6 +1,6 @@
 # Kairo Validation Snapshot
 
-Date: 20260624-085928
+Date: 20260624-090426
 Environment: non-WSL or unknown
 Kernel: unknown
 WSL: unknown
@@ -19,6 +19,7 @@ WSL: unknown
 | stage13_dryrun | pass |
 | stage14_dryrun | pass |
 | stage15_dryrun | pass |
+| stage16_dryrun | pass |
 | user_bench_baseline | skipped |
 | user_bench_mixed | skipped |
 
@@ -48,9 +49,10 @@ WSL: unknown
 - stage13_dryrun.log
 - stage14_dryrun.log
 - stage15_dryrun.log
+- stage16_dryrun.log
 - user_bench_baseline.log
 - user_bench_mixed.log
 
-Results directory: `/mnt/c/Users/ManishKL/Documents/Playground/kv-io/results/validation/20260624-085928`
+Results directory: `/mnt/c/Users/ManishKL/Documents/Playground/kv-io/results/validation/20260624-090426`
 
 Notes: WSL validation only; no custom kernel boot, no Kairo sysfs counters, no physical NVMe placement validation.
