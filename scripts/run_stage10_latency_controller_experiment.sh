@@ -150,7 +150,8 @@ run_case() {
   fi
 
   # Build benchmark command
-  local bench_cmd="$(bench_exe) --duration $DURATION --hint-mode $HINT_MODE"
+  local bench_cmd
+  bench_cmd="$(bench_exe) --duration $DURATION --hint-mode $HINT_MODE"
   if [[ "$case_name" == *"baseline"* ]]; then
     bench_cmd="$bench_cmd --decode-ratio 0.3 --prefetch-ratio 0.3 --write-ratio 0.3"
   elif [[ "$case_name" == *"decode-pressure"* ]]; then
