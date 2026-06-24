@@ -414,6 +414,51 @@ grep -qF -- "--with-tracepoints" "$REPO_ROOT/kernel/integration/linux-6.8/apply_
 grep -qF "0005-kairo-foundation-tracepoints" "$FOUNDATION_DIR/README.md" || \
   fail "Stage 11: foundation README missing tracepoint patch reference"
 
+# Stage 12: verify model/session fairness
+stage12_has_pattern() {
+  local file="$1" pattern="$2"
+  grep -qF -- "$pattern" "$file" || fail "Stage 12: missing pattern '$pattern' in $(basename "$file")"
+}
+
+stage12_file_exists() {
+  [[ -f "$1" ]] || fail "Stage 12: missing file: $1"
+}
+
+P20="$PATCH_DIR/0020-rfc-kairo-model-session-fairness.patch"
+DOC12="$REPO_ROOT/docs/stage12_model_session_fairness.md"
+R12SE="$REPO_ROOT/scripts/run_stage12_fairness_experiment.sh"
+P12SP="$REPO_ROOT/scripts/parse_stage12_fairness_summary.py"
+
+stage12_file_exists "$P20"
+stage12_file_exists "$DOC12"
+stage12_file_exists "$R12SE"
+stage12_file_exists "$P12SP"
+stage12_has_pattern "$P20" "struct kairo_fair_entity"
+stage12_has_pattern "$P20" "struct kairo_fairness_state"
+stage12_has_pattern "$P20" "kairo_fairness_allow_decode"
+stage12_has_pattern "$P20" "kairo_fairness_throttle_prefetch"
+stage12_has_pattern "$P20" "kairo_fairness_demote_write"
+stage12_has_pattern "$P20" "kairo_fairness_account_dispatch"
+stage12_has_pattern "$P20" "kairo_fairness_refill_if_needed"
+stage12_has_pattern "$P20" "kairo_fairness_refills"
+stage12_has_pattern "$P20" "kairo_fairness_model_throttles"
+stage12_has_pattern "$P20" "kairo_fairness_session_throttles"
+stage12_has_pattern "$P20" "kairo_noisy_session_events"
+stage12_has_pattern "$P20" "kairo_protected_decode_dispatches"
+stage12_has_pattern "$P20" "kairo_prefetch_fairness_throttles"
+stage12_has_pattern "$P20" "kairo_write_fairness_demotions"
+stage12_has_pattern "$DOC12" "per-model"
+stage12_has_pattern "$R12SE" "results/stage12"
+stage12_has_pattern "$R12SE" "block-device"
+stage12_has_pattern "$R12SE" "--noisy-multiplier"
+stage12_has_pattern "$P12SP" "--csv"
+stage12_has_pattern "$P12SP" "--pretty"
+stage12_has_pattern "$P12SP" "kairo_fairness_refills_delta"
+
+# Verify collect_kairo_counters.sh includes fairness counters
+grep -qF "kairo_fairness_refills" "$REPO_ROOT/scripts/collect_kairo_counters.sh" || \
+  fail "Stage 12: collect_kairo_counters.sh missing kairo_fairness_refills"
+
 # Stage 9: verify WSL validation files
 [[ -f "$REPO_ROOT/scripts/check_wsl_environment.sh" ]] || fail "Stage 9: missing scripts/check_wsl_environment.sh"
 [[ -f "$REPO_ROOT/scripts/run_wsl_validation_snapshot.sh" ]] || fail "Stage 9: missing scripts/run_wsl_validation_snapshot.sh"

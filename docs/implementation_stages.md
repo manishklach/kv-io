@@ -286,7 +286,45 @@ framework:
   - experiment harness detects `tracepoints_available=true|false`
   - structured results under `results/stage11/<timestamp>/`
 - What distinguishes Stage 11 from Stage 8:
-  - Stage 11: 4 tracepoints, compile-targeted foundation, minimal payloads
-  - Stage 8: 9 tracepoints, broad RFC scaffold, model/session/backend fields
-  - Stage 11 applies only with `--with-tracepoints` flag
-  - Stage 11 uses `LINUX-6.8-CHECK` annotations (vs CONCEPTUAL-HOOK in Stage 8)
+- Stage 11: 4 tracepoints, compile-targeted foundation, minimal payloads
+- Stage 8: 9 tracepoints, broad RFC scaffold, model/session/backend fields
+- Stage 11 applies only with `--with-tracepoints` flag
+- Stage 11 uses `LINUX-6.8-CHECK` annotations (vs CONCEPTUAL-HOOK in Stage 8)
+
+## Stage 12
+
+- Broad RFC/POC patches involved: `0020`
+- Docs: `docs/stage12_model_session_fairness.md`
+- Scripts:
+  - `scripts/run_stage12_fairness_experiment.sh`
+  - `scripts/parse_stage12_fairness_summary.py`
+- What should compile:
+  - `struct kairo_fair_entity` and `struct kairo_fairness_state` in `mq-deadline.c`
+  - fairness credit model with per-entity decode credits
+  - entity lookup (linear scan of fixed-size array)
+  - credit refill mechanism
+  - sysfs tunables: `kairo_fairness_enable`, `kairo_model_decode_credit`,
+    `kairo_session_decode_credit`, `kairo_fairness_refill_ms`,
+    `kairo_noisy_session_threshold`
+  - sysfs counters: `kairo_fairness_refills`,
+    `kairo_fairness_model_throttles`, `kairo_fairness_session_throttles`,
+    `kairo_noisy_session_events`, `kairo_protected_decode_dispatches`,
+    `kairo_prefetch_fairness_throttles`, `kairo_write_fairness_demotions`
+  - conceptual hook points: `kairo_fairness_allow_decode`,
+    `kairo_fairness_throttle_prefetch`, `kairo_fairness_demote_write`,
+    `kairo_fairness_account_dispatch`, `kairo_fairness_refill_if_needed`
+  - noisy session detection with configurable threshold
+- What should be measurable:
+  - fairness counter movement in sysfs when fairness is enabled
+  - five canonical experiment cases comparing balanced vs noisy vs fairness
+  - structured output under `results/stage12/<timestamp>/`
+  - parseable summary logs with CSV and pretty-printed tables
+  - benchmark `--noisy-session`, `--noisy-model`, `--noisy-multiplier` flags
+- What is still RFC-only:
+  - real entity lookup hash table (linear scan for now)
+  - per-device fairness state (uses static/placeholder state)
+  - timer-based credit refill (called from dispatch path)
+  - tracepoint integration with Stage 8 observability
+  - interaction with Stage 10 adaptive controller
+  - effectiveness on real multi-tenant AI inference workloads
+  - optimal credit pool sizes for different inference patterns

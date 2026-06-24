@@ -80,3 +80,32 @@ Stage 10 (`0018`) adds a conceptual adaptive decode tail-latency controller:
 
 Stage 10 is **not** foundation-integrated, **not** LKML-ready, and **not**
 boot-validated. It is an RFC/POC adaptive scheduling policy scaffold.
+
+## Stage 12 Model/Session Fairness Status
+
+Stage 12 (`0020`) adds a conceptual per-model/per-session fairness scheduler:
+
+- **Fairness data structures**: `struct kairo_fair_entity` and `struct kairo_fairness_state`
+  defined in `block/mq-deadline.c` with conceptual annotations
+- **Credit model**: Per-entity decode credits refilled periodically; decode dispatch
+  consumes credits; entities with zero credits have prefetch throttled and writes demoted
+- **Entity lookup**: Linear scan of fixed-size arrays (64 models, 256 sessions)
+- **Noisy session detection**: Configurable threshold; flagged sessions get prefetch
+  throttled even if credits remain
+- **Sysfs**: Tunables (`kairo_fairness_enable`, `kairo_model_decode_credit`,
+  `kairo_session_decode_credit`, `kairo_fairness_refill_ms`,
+  `kairo_noisy_session_threshold`) and counters (`kairo_fairness_refills`,
+  `kairo_fairness_model_throttles`, `kairo_fairness_session_throttles`,
+  `kairo_noisy_session_events`, `kairo_protected_decode_dispatches`,
+  `kairo_prefetch_fairness_throttles`, `kairo_write_fairness_demotions`)
+- **Hook points**: `kairo_fairness_allow_decode`, `kairo_fairness_throttle_prefetch`,
+  `kairo_fairness_demote_write`, `kairo_fairness_account_dispatch`,
+  `kairo_fairness_refill_if_needed` -- all CONCEPTUAL-HOOK
+- **Experiment harness**: Five canonical cases with structured results under
+  `results/stage12/<timestamp>/`
+- **Summary parser**: `parse_stage12_fairness_summary.py` with CSV and pretty-printed
+  output, fairness counter delta columns
+
+Stage 12 is **not** foundation-integrated, **not** LKML-ready, and **not**
+boot-validated. It is an RFC/POC fairness scheduling policy scaffold for
+multi-tenant AI inference workloads.

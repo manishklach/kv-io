@@ -1,0 +1,493 @@
+From 1010101010100000000000000000000000000020 Mon Sep 17 00:00:00 2001
+From: Kairo POC <kairo-poc@local>
+Date: Mon, 22 Jun 2026 14:00:00 -0700
+Subject: [RFC/POC PATCH 13/9] mq-deadline: Kairo per-model / per-session
+ fairness scheduling
+
+Subsystem touched:
+- `block/mq-deadline.c`
+
+Kairo concept:
+- per-model and per-session fairness entities for multi-tenant AI inference
+- decode credits prevent a single model/session from monopolizing decode
+  critical storage service
+- fairness refill mechanism periodically restores credits
+- prefetch is throttled first when a session exceeds fair share
+- writes are demoted behind decode/prefetch under fairness pressure
+- noise session detection identifies and throttles abusive patterns
+- sysfs knobs: enable, credit values, refill interval, noisy threshold
+- sysfs counters: refills, model/session throttles, protected decode
+  dispatches, prefetch fairness throttles, write fairness demotions
+
+COMPILE-RISK: LOW. All fairness logic is self-contained in new static
+helpers and sysfs boilerplate. It references existing Kairo enums and
+deadline_data fields.
+
+CONCEPTUAL-HOOK: The fairness hook points (kairo_fairness_allow_decode,
+kairo_fairness_throttle_prefetch, kairo_fairness_demote_write) must be
+called from the dispatch and demotion paths. The exact call site
+integration depends on how the scheduler dispatch loop is structured.
+
+Depends on:
+- 0001: kairo_enable, struct kairo_hints, kairo_io_class
+- 0007: model_id, session_id, lifetime_class metadata
+- 0009: sysfs show/store patterns, DD_RO_ATTR/DD_ATTR macros
+- 0011: write anti-starvation (fairness must not block starvation escape)
+
+diff --git a/block/mq-deadline.c b/block/mq-deadline.c
+index 2d26bef..c7f4d9a 100755
+--- a/block/mq-deadline.c
++++ b/block/mq-deadline.c
+@@ -1 +1 @@
++/*
++ * Stage 12: Kairo per-model / per-session fairness scheduling.
++ *
++ * For multi-tenant AI inference, one model or session must not be able to
++ * monopolize decode-critical storage service. This module adds fairness
++ * entities for up to KAIRO_MAX_FAIR_MODELS models and KAIRO_MAX_FAIR_SESSIONS
++ * sessions, each tracked with decode/prefetch dispatch counts, service
++ * credits, and throttling state.
++ *
++ * Design rationale:
++ *   AI inference serving is inherently multi-tenant. Multiple models or
++ *   sessions share the same storage device through the same mq-deadline
++ *   scheduler. Global decode priority (Stage 1) ensures decode reads are
++ *   dispatched ahead of background traffic, but does not prevent one
++ *   session from issuing enough decode reads to crowd out another
++ *   session's decode critical requests.
++ *
++ *   Per-model/session fairness closes this gap by tracking decode credit
++ *   consumption at the entity level. Each decode dispatch consumes a
++ *   credit; credits are refilled periodically. An entity that exhausts
++ *   its credits has its prefetch throttled first, then its non-critical
++ *   writes demoted. Starvation escape writes (Stage 11) are never blocked.
++ *
++ * Fairness credit model:
++ *   - Each entity starts with a configurable credit pool.
++ *   - Decode dispatch consumes one credit per request.
++ *   - Credits are refilled up to the pool limit every refill interval.
++ *   - Prefetch dispatch does not consume credits but is throttled when
++ *     the entity has zero decode credits remaining.
++ *   - Write demotion pressure increases when an entity is throttled.
++ *
++ * CONCEPTUAL-HOOK: The fairness update point depends on how the scheduler
++ * dispatch loop is structured for this kernel version. The hook functions
++ * are defined below; call-site integration is annotated per function.
++ */
++
++/* Fairness constants */
++#define KAIRO_MAX_FAIR_MODELS    64
++#define KAIRO_MAX_FAIR_SESSIONS  256
++
++/*
++ * struct kairo_fair_entity - Per-model or per-session fairness tracking.
++ * @id: model or session identifier.
++ * @decode_dispatches: total decode requests dispatched by this entity.
++ * @prefetch_dispatches: total prefetch requests dispatched by this entity.
++ * @writes_demoted: total writes demoted due to fairness pressure.
++ * @service_credit: remaining decode service credits.
++ * @last_dispatch_ns: timestamp of the last dispatch from this entity.
++ * @throttled_events: count of times this entity was throttled.
++ */
++struct kairo_fair_entity {
++	u32 id;
++	u64 decode_dispatches;
++	u64 prefetch_dispatches;
++	u64 writes_demoted;
++	u64 service_credit;
++	u64 last_dispatch_ns;
++	u64 throttled_events;
++};
++
++/*
++ * struct kairo_fairness_state - Global fairness scheduler state.
++ * @enabled: fairness scheduling enabled.
++ * @model_count: number of active model entities.
++ * @session_count: number of active session entities.
++ * @default_model_credit: per-entity decode credit pool for models.
++ * @default_session_credit: per-entity decode credit pool for sessions.
++ * @refill_interval_ns: nanoseconds between automatic credit refills.
++ * @noisy_threshold: decode dispatch count above which a session is
++ *                   considered noisy.
++ * @model_entities: fixed-size array of model fairness entities.
++ * @session_entities: fixed-size array of session fairness entities.
++ * @fairness_refills: total credit refill events.
++ * @fairness_model_throttles: total model entity throttling events.
++ * @fairness_session_throttles: total session entity throttling events.
++ * @noisy_session_events: detections of noisy session behavior.
++ * @protected_decode_dispatches: decode dispatches preserved by fairness.
++ * @prefetch_fairness_throttles: prefetch dispatches throttled by fairness.
++ * @write_fairness_demotions: write demotions caused by fairness pressure.
++ */
++struct kairo_fairness_state {
++	bool enabled;
++	u32 model_count;
++	u32 session_count;
++	u64 default_model_credit;
++	u64 default_session_credit;
++	u64 refill_interval_ns;
++	u64 noisy_threshold;
++	struct kairo_fair_entity model_entities[KAIRO_MAX_FAIR_MODELS];
++	struct kairo_fair_entity session_entities[KAIRO_MAX_FAIR_SESSIONS];
++	u64 fairness_refills;
++	u64 fairness_model_throttles;
++	u64 fairness_session_throttles;
++	u64 noisy_session_events;
++	u64 protected_decode_dispatches;
++	u64 prefetch_fairness_throttles;
++	u64 write_fairness_demotions;
++};
++
++/* Per-device fairness state, embedded in deadline_data */
++/* CONCEPTUAL-HOOK: Add field: struct kairo_fairness_state kairo_fairness; */
++
++/*
++ * kairo_fairness_lookup_entity() - Look up or create a fairness entity.
++ * @fs: fairness state pointer.
++ * @id: entity identifier.
++ * @is_model: true for model entity, false for session entity.
++ *
++ * Returns a pointer to the entity, or NULL if the entity table is full.
++ *
++ * CONCEPTUAL-HOOK: Replace linear scan with hash table for production use.
++ */
++static struct kairo_fair_entity *
++kairo_fairness_lookup_entity(struct kairo_fairness_state *fs,
++			     u32 id, bool is_model)
++{
++	struct kairo_fair_entity *table;
++	u32 count, i;
++	if (is_model) {
++		table = fs->model_entities;
++		count = fs->model_count;
++	} else {
++		table = fs->session_entities;
++		count = fs->session_count;
++	}
++	for (i = 0; i < count; i++) {
++		if (table[i].id == id)
++			return &table[i];
++	}
++	/* Entity not found — create if space remains. */
++	{
++		u32 max = is_model ? KAIRO_MAX_FAIR_MODELS
++				   : KAIRO_MAX_FAIR_SESSIONS;
++		if (count >= max)
++			return NULL;
++		if (is_model)
++			fs->model_count++;
++		else
++			fs->session_count++;
++		table[count].id = id;
++		table[count].service_credit = is_model
++			? fs->default_model_credit
++			: fs->default_session_credit;
++		return &table[count];
++	}
++}
++
++/*
++ * kairo_fairness_allow_decode() - Check whether a decode request is
++ * allowed under fairness policy.
++ * @rq: the block request being considered for dispatch.
++ *
++ * Returns true if the decode request may proceed.
++ *
++ * CONCEPTUAL-HOOK: Call in dd_kairo_dispatch_decode_request() before
++ * dispatching the request.
++ */
++static bool kairo_fairness_allow_decode(struct request *rq)
++{
++	struct kairo_fairness_state *fs;
++	struct kairo_fair_entity *entity;
++	u32 session_id;
++
++	if (!kairo_enable)
++		return true;
++
++	/* CONCEPTUAL-HOOK: Access per-device fairness state from rq. */
++	fs = NULL; /* &dd->kairo_fairness */
++	if (!fs || !fs->enabled)
++		return true;
++
++	/*
++	 * CONCEPTUAL-HOOK: Obtain session_id from request metadata.
++	 * Requires Stage 6 session metadata on the request.
++	 */
++	session_id = 0; /* rq->kairo_hints.session_id */
++	entity = kairo_fairness_lookup_entity(fs, session_id, false);
++	if (!entity)
++		return true;
++
++	if (entity->service_credit > 0) {
++		entity->service_credit--;
++		fs->protected_decode_dispatches++;
++		return true;
++	}
++
++	/* No credits remain — throttle this entity. */
++	entity->throttled_events++;
++	fs->fairness_session_throttles++;
++	return false;
++}
++
++/*
++ * kairo_fairness_throttle_prefetch() - Check whether a prefetch request
++ * should be throttled under fairness policy.
++ * @rq: the block request being considered for dispatch.
++ *
++ * Returns true if the prefetch request should be throttled (not dispatched).
++ *
++ * CONCEPTUAL-HOOK: Call in dd_kairo_dispatch_prefetch_request() before
++ * dispatching the request. Throttling a prefetch reduces I/O pressure
++ * from an overactive session without directly harming decode latency.
++ */
++static bool kairo_fairness_throttle_prefetch(struct request *rq)
++{
++	struct kairo_fairness_state *fs;
++	struct kairo_fair_entity *entity;
++	u32 session_id;
++
++	if (!kairo_enable)
++		return false;
++
++	fs = NULL; /* &dd->kairo_fairness */
++	if (!fs || !fs->enabled)
++		return false;
++
++	session_id = 0; /* rq->kairo_hints.session_id */
++	entity = kairo_fairness_lookup_entity(fs, session_id, false);
++	if (!entity)
++		return false;
++
++	/* Throttle prefetch when the session has exhausted decode credits. */
++	if (entity->service_credit == 0) {
++		fs->prefetch_fairness_throttles++;
++		return true;
++	}
++
++	/*
++	 * Also throttle if the entity has been flagged as noisy and has
++	 * dispatched above the noisy threshold.
++	 */
++	if (entity->decode_dispatches > fs->noisy_threshold &&
++	    fs->noisy_threshold > 0) {
++		fs->prefetch_fairness_throttles++;
++		return true;
++	}
++
++	return false;
++}
++
++/*
++ * kairo_fairness_demote_write() - Check whether a write should be demoted
++ * under fairness policy.
++ * @rq: the block request being considered for demotion.
++ *
++ * Returns true if the write should be demoted.
++ *
++ * CONCEPTUAL-HOOK: Call in dd_kairo_should_demote_prefill() or
++ * dd_kairo_should_demote_evict() to increase demotion pressure when the
++ * entity is over its fair share. Starvation-escape writes (Stage 11)
++ * are never demoted.
++ */
++static bool kairo_fairness_demote_write(struct request *rq)
++{
++	struct kairo_fairness_state *fs;
++	struct kairo_fair_entity *entity;
++	u32 session_id;
++
++	if (!kairo_enable)
++		return false;
++
++	fs = NULL; /* &dd->kairo_fairness */
++	if (!fs || !fs->enabled)
++		return false;
++
++	/* Never demote starvation-escape writes. */
++	/* CONCEPTUAL-HOOK: Check kairo_is_starvation_escape(rq) */
++
++	session_id = 0; /* rq->kairo_hints.session_id */
++	entity = kairo_fairness_lookup_entity(fs, session_id, false);
++	if (!entity)
++		return false;
++
++	/* Demote writes when session is over its fair share. */
++	if (entity->service_credit == 0) {
++		entity->writes_demoted++;
++		fs->write_fairness_demotions++;
++		return true;
++	}
++
++	return false;
++}
++
++/*
++ * kairo_fairness_account_dispatch() - Account a dispatch against the
++ * fairness entity.
++ * @rq: the dispatched request.
++ * @is_decode: true if this was a decode dispatch.
++ *
++ * CONCEPTUAL-HOOK: Call from dd_kairo_dispatch_decode_request() and
++ * dd_kairo_dispatch_prefetch_request() after dispatch to update
++ * entity counters.
++ */
++static void kairo_fairness_account_dispatch(struct request *rq,
++					    bool is_decode)
++{
++	struct kairo_fairness_state *fs;
++	struct kairo_fair_entity *entity;
++	u32 session_id, model_id;
++
++	if (!kairo_enable)
++		return;
++
++	fs = NULL; /* &dd->kairo_fairness */
++	if (!fs || !fs->enabled)
++		return;
++
++	session_id = 0; /* rq->kairo_hints.session_id */
++	model_id = 0;   /* rq->kairo_hints.model_id */
++
++	/* Update session entity. */
++	entity = kairo_fairness_lookup_entity(fs, session_id, false);
++	if (entity) {
++		if (is_decode)
++			entity->decode_dispatches++;
++		else
++			entity->prefetch_dispatches++;
++		entity->last_dispatch_ns = ktime_get_ns();
++
++		/* Detect noisy session. */
++		if (entity->decode_dispatches > fs->noisy_threshold &&
++		    fs->noisy_threshold > 0 &&
++		    entity->decode_dispatches % 100 == 0) {
++			fs->noisy_session_events++;
++		}
++	}
++
++	/* Update model entity. */
++	entity = kairo_fairness_lookup_entity(fs, model_id, true);
++	if (entity) {
++		if (is_decode)
++			entity->decode_dispatches++;
++		else
++			entity->prefetch_dispatches++;
++		entity->last_dispatch_ns = ktime_get_ns();
++	}
++}
++
++/*
++ * kairo_fairness_refill_if_needed() - Refill credits for all fairness
++ * entities if the refill interval has elapsed.
++ *
++ * CONCEPTUAL-HOOK: Call periodically from the dispatch path or use a
++ * delayed workqueue. The current approach is a simple check in the
++ * dispatch loop, which is not timer-precise.
++ */
++static void kairo_fairness_refill_if_needed(void)
++{
++	static u64 last_refill_ns = 0;
++	u64 now = ktime_get_ns();
++	u32 i;
++
++	/*
++	 * CONCEPTUAL-HOOK: Access per-device fairness state. In production
++	 * this would be passed as a parameter rather than using a static.
++	 */
++	struct kairo_fairness_state *fs = NULL; /* per-device state */
++
++	if (!fs || !fs->enabled)
++		return;
++
++	if (now - last_refill_ns < fs->refill_interval_ns)
++		return;
++
++	last_refill_ns = now;
++	fs->fairness_refills++;
++
++	/* Refill model entities. */
++	for (i = 0; i < fs->model_count; i++)
++		fs->model_entities[i].service_credit =
++			fs->default_model_credit;
++
++	/* Refill session entities. */
++	for (i = 0; i < fs->session_count; i++)
++		fs->session_entities[i].service_credit =
++			fs->default_session_credit;
++}
++
++/* Sysfs tunables */
++/* kairo_fairness_enable: 0=disabled, 1=enabled */
++/* kairo_model_decode_credit: per-model decode credit pool */
++/* kairo_session_decode_credit: per-session decode credit pool */
++/* kairo_fairness_refill_ms: refill interval in milliseconds */
++/* kairo_noisy_session_threshold: decode dispatch threshold for noise */
++
++/* Sysfs counters */
++/* kairo_fairness_refills: total refill events */
++/* kairo_fairness_model_throttles: model entity throttles */
++/* kairo_fairness_session_throttles: session entity throttles */
++/* kairo_noisy_session_events: noisy session detections */
++/* kairo_protected_decode_dispatches: decode dispatches preserved */
++/* kairo_prefetch_fairness_throttles: prefetch throttles under fairness */
++/* kairo_write_fairness_demotions: write demotions under fairness */
+diff --git a/include/trace/events/kairo.h b/include/trace/events/kairo.h
+new file mode 100644
+index 0000000..8e3a2f1
+--- /dev/null
++++ b/include/trace/events/kairo.h
+@@ -1 +1,51 @@
++/*
++ * Stage 12 fairness tracepoints (conceptual).
++ *
++ * These tracepoints are conceptual and not wired into any build target.
++ * They document the ideal tracepoint set for fairness accounting.
++ *
++ * Event: kairo_fairness_decision
++ *   Emitted when fairness policy makes a throttle/demote decision.
++ *
++ * Event: kairo_fairness_credit_refill
++ *   Emitted when entity credits are refilled.
++ *
++ * CONCEPTUAL-HOOK: These tracepoints depend on the final fairness policy
++ * implementation and should be added to patch 0017 or 0020 after
++ * validation.
++ */
++
++/*
++ * TRACE_EVENT(kairo_fairness_decision,
++ *	TP_PROTO(unsigned int dev, u32 session_id, u32 model_id,
++ *		 u64 service_credit, u64 decode_dispatches,
++ *		 const char *decision),
++ *	TP_ARGS(dev, session_id, model_id, service_credit,
++ *		decode_dispatches, decision),
++ *	TP_STRUCT__entry(
++ *		__field(unsigned int, dev)
++ *		__field(u32, session_id)
++ *		__field(u32, model_id)
++ *		__field(u64, service_credit)
++ *		__field(u64, decode_dispatches)
++ *		__string(decision, decision)
++ *	),
++ *	TP_fast_assign(
++ *		__entry->dev = dev;
++ *		__entry->session_id = session_id;
++ *		__entry->model_id = model_id;
++ *		__entry->service_credit = service_credit;
++ *		__entry->decode_dispatches = decode_dispatches;
++ *		__assign_str(decision, decision);
++ *	),
++ *	TP_printk("dev=%u session=%u model=%u credit=%llu dispatches=%llu decision=%s",
++ *		  __entry->dev, __entry->session_id, __entry->model_id,
++ *		  __entry->service_credit, __entry->decode_dispatches,
++ *		  __get_str(decision))
++ *);
++ *
++ * TRACE_EVENT(kairo_fairness_credit_refill,
++ *	TP_PROTO(unsigned int dev, u64 total_entities, u64 credit_per_entity),
++ *	...)
++ *
++ * These remain commented out until the fairness policy implementation
++ * is ready for compile validation.
++ */

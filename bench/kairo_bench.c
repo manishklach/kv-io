@@ -83,6 +83,9 @@ struct kairo_config {
     uint32_t lifetime_class;
     bool recompute_ok;
     enum kairo_backend_mode backend_mode;
+    unsigned int noisy_session;
+    unsigned int noisy_model;
+    unsigned int noisy_multiplier;
 };
 
 struct kairo_stats {
@@ -421,7 +424,10 @@ static void usage(const char *prog)
             "  --backend-mode <name>     none|generic|streams|fdp|zns\n"
             "  --random-read             Default mode\n"
             "  --sequential-read         Disable random read placement\n"
-            "  --buffered                Disable O_DIRECT\n",
+            "  --buffered                Disable O_DIRECT\n"
+            "  --noisy-session <n>       Session ID for noise stress test\n"
+            "  --noisy-model <n>         Model ID for noise stress test\n"
+            "  --noisy-multiplier <n>    Traffic multiplier for noisy entity\n",
             prog);
 }
 
@@ -1272,6 +1278,11 @@ static void print_summary(const struct kairo_config *cfg, const struct kairo_sta
     printf("fixed_session_id=%u\n", cfg->fixed_session_id);
     printf("fixed_cache_pool_id=%u\n", cfg->fixed_cache_pool_id);
     printf("fixed_placement_group=%u\n", cfg->fixed_placement_group);
+    printf("noisy_session=%u\n", cfg->noisy_session);
+    printf("noisy_model=%u\n", cfg->noisy_model);
+    printf("noisy_multiplier=%u\n", cfg->noisy_multiplier);
+    printf("fairness_mode=%s\n",
+           cfg->noisy_session > 0 || cfg->noisy_model > 0 ? "stress" : "none");
     {
         struct kairo_backend_model m = kairo_compute_backend_model(cfg);
         printf("backend_mode=%s\n", kairo_backend_mode_name(cfg->backend_mode));
@@ -1372,6 +1383,9 @@ int main(int argc, char **argv)
         {"cache-pools", required_argument, NULL, 15},
         {"placement-groups", required_argument, NULL, 16},
         {"backend-mode", required_argument, NULL, 17},
+        {"noisy-session", required_argument, NULL, 18},
+        {"noisy-model", required_argument, NULL, 19},
+        {"noisy-multiplier", required_argument, NULL, 20},
         {"random-read", no_argument, NULL, 1},
         {"sequential-read", no_argument, NULL, 2},
         {"buffered", no_argument, NULL, 3},
@@ -1461,6 +1475,15 @@ int main(int argc, char **argv)
             break;
         case 17:
             cfg.backend_mode = parse_backend_mode(optarg);
+            break;
+        case 18:
+            cfg.noisy_session = (unsigned int)parse_size(optarg, "noisy-session");
+            break;
+        case 19:
+            cfg.noisy_model = (unsigned int)parse_size(optarg, "noisy-model");
+            break;
+        case 20:
+            cfg.noisy_multiplier = (unsigned int)parse_size(optarg, "noisy-multiplier");
             break;
         case 4:
             cfg.stride_blocks = (unsigned int)parse_size(optarg, "stride-blocks");

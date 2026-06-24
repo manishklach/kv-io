@@ -117,6 +117,15 @@ counter_names=(
   kairo_controller_prefetch_throttles
   kairo_controller_write_releases
   kairo_controller_insufficient_samples
+
+  # Stage 12: per-model/session fairness counters
+  kairo_fairness_refills
+  kairo_fairness_model_throttles
+  kairo_fairness_session_throttles
+  kairo_noisy_session_events
+  kairo_protected_decode_dispatches
+  kairo_prefetch_fairness_throttles
+  kairo_write_fairness_demotions
 )
 
 for name in "${counter_names[@]}"; do

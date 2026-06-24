@@ -21,6 +21,7 @@
 | BPF dispatch hook | `0016` | conceptual | BPF_PROG_TYPE_KAIRO_SCHED for programmable I/O scheduling |
 | adaptive latency controller | `0018` | conceptual | Adjusts decode/prefetch budgets based on observed decode p99 latency; sysfs knobs and counters; six canonical experiment cases |
 | foundation tracepoints | `0022` / foundation `0005` | compile-targeted | Four compile-targeted tracepoints (classify, decode dispatch, prefetch dispatch, write demoted) for Linux 6.8.x foundation; optional apply via `--with-tracepoints`; `LINUX-6.8-CHECK` annotations |
+| model/session fairness | `0020` | conceptual | Per-model and per-session fairness scheduler for multi-tenant AI inference; credit-based decode scheduling; prefetch throttling and write demotion under fairness pressure; noisy session detection; seven sysfs counters; five canonical experiment cases |
 
 ## Stage 6.5 Status
 
@@ -133,6 +134,26 @@
 | Experiment harness | implemented | `run_stage11_foundation_trace_experiment.sh` with trace detection, ftrace capture, and structured results |
 | Summary parser | implemented | `parse_stage11_foundation_trace_summary.py` with CSV and pretty-printed output |
 | Stage 11 documentation | implemented | `docs/stage11_foundation_tracepoints.md` |
+
+## Stage 12 Status
+
+| Area | Status | Notes |
+|------|--------|-------|
+| Fairness data structures | scaffolded | `struct kairo_fair_entity`, `struct kairo_fairness_state` in mq-deadline.c |
+| Entity lookup | conceptual | Linear scan of fixed-size arrays (up to 64 models, 256 sessions) |
+| Credit refill mechanism | conceptual | Called from dispatch path; needs timer-based refill for production |
+| Noisy session detection | conceptual | Threshold-based detection with counter |
+| Fairness dispatch gating | conceptual | `kairo_fairness_allow_decode` hook defined |
+| Prefetch throttling | conceptual | `kairo_fairness_throttle_prefetch` hook defined |
+| Write demotion pressure | conceptual | `kairo_fairness_demote_write` hook defined |
+| Entity accounting | conceptual | `kairo_fairness_account_dispatch` hook defined |
+| Fairness sysfs counters | scaffolded | 7 counters defined in patch but not wired in sysfs boilerplate |
+| Fairness sysfs tunables | scaffolded | 5 tunables defined in patch but not wired in sysfs boilerplate |
+| Experiment harness | implemented | `run_stage12_fairness_experiment.sh` with five canonical cases |
+| Summary parser | implemented | `parse_stage12_fairness_summary.py` with CSV and pretty-printed output |
+| Benchmark noisy flags | implemented | `--noisy-session`, `--noisy-model`, `--noisy-multiplier` in kairo_bench.c |
+| Counter coverage | updated | `collect_kairo_counters.sh` includes Stage 12 fairness counters |
+| Stage 12 documentation | implemented | `docs/stage12_model_session_fairness.md` |
 
 ## Current Read
 
